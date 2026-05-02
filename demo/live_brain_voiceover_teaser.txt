@@ -1,0 +1,4 @@
+Semantic memory remembers text. Live Brain maintains operational truth.
+It knows which artifact is verified, which one is stale, which work is active, and which self-change is risky.
+The agent learns from failures, but high-risk changes go through an approval gate.
+Beyond vector memory: auditable, safety-gated memory for long-running agents.

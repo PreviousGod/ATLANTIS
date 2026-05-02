@@ -1,0 +1,60 @@
+{
+  "_docs": {
+    "chit_chat_patterns": "Exact normalized short user messages that should receive no Live Brain context. Use for greetings/acks only, not task words.",
+    "low_signal_words": "Generic words ignored while deciding whether an episode adds signal. Do not put tool names, filenames, or concrete error codes here.",
+    "section_limits": "Maximum injected rows per context section. Keep small so weak LLMs get deterministic, high-signal context.",
+    "auto_surface_pending_approvals": "When true, pending self-evolution approvals are injected into the next turn even if the user did not ask for approvals."
+  },
+  "chit_chat_patterns": [
+    "zdravo",
+    "hello",
+    "hi",
+    "hey",
+    "cao",
+    "ćao",
+    "ciao",
+    "ok",
+    "okej",
+    "da",
+    "ne",
+    "ajde",
+    "nastavi",
+    "sta ima",
+    "šta ima",
+    "kako si"
+  ],
+  "low_signal_words": [
+    "problem",
+    "plugin",
+    "memory",
+    "brain",
+    "generation",
+    "generate",
+    "napravi",
+    "uradi",
+    "kako",
+    "sta",
+    "šta",
+    "what",
+    "which",
+    "with",
+    "video",
+    "image",
+    "radi",
+    "recap",
+    "poslednje",
+    "uradjeno"
+  ],
+  "section_limits": {
+    "MUST FOLLOW": 3,
+    "ACTIVE TASK": 1,
+    "KNOWN FACTS": 4,
+    "OPEN BUG": 2,
+    "PROVEN FIX": 3,
+    "NEXT REQUIRED ACTION": 1,
+    "RECENT EPISODES": 3,
+    "VERIFIED ARTIFACTS": 5,
+    "PENDING APPROVAL": 3
+  },
+  "auto_surface_pending_approvals": true
+}

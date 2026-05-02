@@ -1,0 +1,4 @@
+name: live_brain
+description: Local provider-based live brain for Hermes with typed episodic, temporal, and causal memory.
+version: 0.1.0
+kind: exclusive

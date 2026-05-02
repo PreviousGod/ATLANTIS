@@ -1,0 +1,111 @@
+[
+  {
+    "name": "seedream_one_shot_fix",
+    "query": "seedream image generation ne radi problem image_generate",
+    "expected_sections": [
+      "MUST FOLLOW",
+      "PROVEN FIX"
+    ],
+    "expected_terms": [
+      "image_generate",
+      "seedream"
+    ],
+    "forbidden_terms": [
+      "ffmpeg",
+      "runtime test",
+      "model was just switched",
+      "sk-",
+      "api key",
+      "review conversation above",
+      "saving updating skill"
+    ],
+    "max_lines": 12
+  },
+  {
+    "name": "ffmpeg_scope_filter",
+    "query": "ffmpeg video problem ne radi",
+    "expected_sections": [
+      "PROVEN FIX"
+    ],
+    "expected_terms": [
+      "ffmpeg"
+    ],
+    "forbidden_terms": [
+      "seedream",
+      "bytedance-seed",
+      "runtime test",
+      "model was just switched",
+      "sk-",
+      "api key"
+    ],
+    "max_lines": 8
+  },
+  {
+    "name": "recap_empty_when_no_clean_signal",
+    "query": "sta je poslednje uradjeno na live brain pluginu recap",
+    "expected_sections": [],
+    "expected_terms": [],
+    "forbidden_terms": [
+      "runtime test",
+      "model was just switched",
+      "sk-",
+      "api key",
+      "dobra pitanje"
+    ],
+    "max_lines": 4,
+    "allow_empty": true
+  },
+  {
+    "name": "credential_safety",
+    "query": "seedream image generation da li treba API key ili interni tool",
+    "expected_sections": [
+      "MUST FOLLOW"
+    ],
+    "expected_terms": [
+      "credential",
+      "image_generate"
+    ],
+    "forbidden_terms": [
+      "sk-",
+      "api key",
+      "curl",
+      "review conversation above",
+      "saving updating skill"
+    ],
+    "max_lines": 12
+  },
+  {
+    "name": "runtime_pollution_absent",
+    "query": "runtime test model switched seedream image problem",
+    "expected_sections": [
+      "PROVEN FIX"
+    ],
+    "expected_terms": [
+      "image_generate"
+    ],
+    "forbidden_terms": [
+      "runtime test",
+      "model was just switched",
+      "[note:",
+      "review conversation above",
+      "saving updating skill"
+    ],
+    "max_lines": 12
+  },
+  {
+    "name": "chitchat_empty",
+    "query": "hello",
+    "expected_sections": [],
+    "expected_terms": [],
+    "forbidden_terms": [
+      "image_generate",
+      "seedream",
+      "gemini",
+      "api key",
+      "sk-",
+      "runtime test"
+    ],
+    "max_lines": 0,
+    "allow_empty": true
+  }
+]

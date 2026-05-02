@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local environments
+.venv/
+venv/
+env/
+
+# Hermes / Live Brain runtime state
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+*.bak
+*.backup
+*.log
+.hermes/
+telegram_test_venv/
+*session*
+*.session
+*.session-journal
+
+# Secrets and local config
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets.*
+credentials.*
+
+# Generated demo media: publish these as GitHub Release assets instead
+demo/*.mp4
+demo/*.mov
+demo/*.wav
+demo/*.mp3
+demo/*.png
+
+# Local reports
+/tmp/
+*.report.json
+*_report.json

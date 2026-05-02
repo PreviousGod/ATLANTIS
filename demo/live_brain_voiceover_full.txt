@@ -1,0 +1,11 @@
+Most agent memory today is semantic search. It remembers similar text.
+Useful, but not enough.
+Live Brain maintains operational truth: what is verified, stale, blocked, risky, approved, and why it entered the prompt.
+Here is the failure mode. Semantic search can find the old Enoch video because it looks similar.
+Live Brain knows it was rejected, and selects the verified artifact instead.
+It also keeps work state, not transcript soup: active, blocked, resolved, superseded.
+When the agent learns from failures, high-risk changes do not silently mutate behavior.
+They enter an approval gate with evidence, risk score, suggested tests, and an audit trail.
+And when context enters the prompt, you can inspect why.
+This is the missing control layer for long-running agents: verified artifacts, causal learning, context explainability, and safety-gated self-evolution.
+Beyond vector memory. Live Brain makes agent memory operational.
