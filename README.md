@@ -1,6 +1,84 @@
 # ATLANTIS
 
-ATLANTIS is a Hermes Live Brain plugin: a local SQLite-backed memory/context system for Hermes designed to give even weak LLMs deterministic, high-signal context.
+**Semantic memory remembers similar text. ATLANTIS maintains operational truth.**
+
+ATLANTIS is a Hermes Live Brain plugin: a local SQLite-backed memory/context system for long-running agents that need to know what is true, stale, risky, approved, blocked, and safe to do next.
+
+## The Problem
+
+Most agent memory systems answer one question: **"what old text looks similar to this prompt?"**
+
+That is useful, but it is not enough for autonomous agents. Long-running agents fail because they:
+
+- recall stale facts as if they are current
+- mix unrelated projects, runs, files, and corrections
+- repeat causes that were already ruled out
+- treat hypotheses as validated facts
+- choose artifacts because filenames look similar, not because they are verified
+- hallucinate current/high-stakes answers from old memory
+- lack an approval gate for dangerous actions or self-modification
+- cannot explain why a memory entered the prompt
+
+ATLANTIS treats memory as **operational state management**, not just retrieval.
+
+## What ATLANTIS Does Differently
+
+| Ordinary semantic memory | ATLANTIS |
+|---|---|
+| Retrieves similar text | Tracks current operational reality |
+| Stores memories as blobs | Separates facts, beliefs, rules, artifacts, work items, evidence, and audit events |
+| Recalls stale notes | Applies TTL, authority policy, and high-stakes freshness checks |
+| Can repeat bad diagnoses | Tracks belief lifecycle: `open → validated / falsified / ruled_out / superseded` |
+| Finds files by fuzzy match | Uses a verified artifact registry with roles and statuses |
+| Has little safety policy | Adds action gates for high-risk operations |
+| Self-improvement can be unsafe | Gates self-evolution proposals with risk scoring and approval |
+| Context is opaque | Records context impressions and attribution |
+
+## Why It Matters
+
+ATLANTIS gives an agent **situational awareness**:
+
+- What task is active?
+- What loop is still open?
+- What caused the last failure?
+- What cause was ruled out?
+- Which file is verified and which was rejected?
+- Which information must be researched again because it is current or high-stakes?
+- Which action is too risky to perform without approval?
+- Why did this exact context enter the prompt?
+
+That turns memory from a pile of transcripts into an inspectable control layer.
+
+## Best Capabilities
+
+- **Reality Engine:** active tasks, open loops, blockers, danger zones, constraints, and safe next actions.
+- **Belief lifecycle:** hypotheses are not facts; causes can be validated, falsified, ruled out, or superseded.
+- **Epistemic discipline:** current/high-stakes questions require fresh authoritative sources or a safe "I cannot confirm" answer.
+- **Verified artifacts:** exact project files are selected by verified role/status, not filename similarity.
+- **Action gates:** dangerous actions such as trading, DB schema changes, credential exposure, public network exposure, and media sends are policy-checked.
+- **Audit spine:** memory mutations write revisions, evidence packets, and maintenance records.
+- **Context attribution:** the system can explain what was injected into the prompt and why.
+- **Gated self-evolution:** the agent can propose improvements without silently applying high-risk code/config/schema changes.
+
+## Why It Is Different
+
+A normal memory layer helps an agent remember. ATLANTIS helps an agent **operate**.
+
+Example: if the user asks "a link?", semantic memory may return every old link that looks similar. ATLANTIS can know the current active link, that the service refused connection, and that the next safe action is checking the service status.
+
+Example: if the user asks for current CME/NQ price-limit rules, semantic memory may recall an old numeric note. ATLANTIS marks the question as current/high-stakes, prefers official sources, blocks unsupported numeric claims, and gives a safe answer if extraction fails.
+
+## Benchmark Snapshot
+
+The included deterministic benchmark compares ATLANTIS against a MemPalace-style semantic-memory baseline. It is not an official MemPalace runtime adapter; it models the common "store text, retrieve overlapping memories" class of systems.
+
+```text
+ATLANTIS:                 100.0 / 100
+MemPalace-style baseline:   5.7 / 100
+Case wins:                    7 / 7
+```
+
+Covered cases include situational awareness, action gating, autonomous research triggers, authority filtering, evidence discipline, TTL-backed learning, and stale recall prevention for high-stakes/current questions.
 
 ## Public Repo Note
 
