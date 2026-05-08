@@ -47,7 +47,7 @@ _CONSTRAINT_TTL_DAYS = 7
 _MAX_ACTIVE_EPISODES = 3
 _MAX_FACT_LEN = 200
 _CHIT_CHAT_PATTERNS = {'zdravo', 'hello', 'hi', 'ok', 'da', 'ne', 'hmm', 'hm', 'ajde', 'nastavi', 'cekaj', 'čekaj', 'naravno', 'sta ima', 'kako si'}
-_LOW_SIGNAL_WORDS = {'problem', 'plugin', 'memory', 'brain', 'generation', 'generate', 'napravi', 'uradi', 'kako', 'sta', 'what', 'which', 'with', 'video', 'image', 'radi', 'recap', 'poslednje', 'uradjeno'}
+_LOW_SIGNAL_WORDS = {'problem', 'plugin', 'memory', 'brain', 'generation', 'generate', 'napravi', 'uradi', 'kako', 'sta', 'šta', 'what', 'which', 'with', 'video', 'image', 'radi', 'recap', 'poslednje', 'uradjeno', 'urađeno', 'gde', 'gdje', 'dje', 'stali', 'stao', 'stala', 'rekao', 'rekla', 'rekli', 'sam', 'smo', 'sta', 'šta', 'odgovori', 'odgovor', 'sećanja', 'sećanja', 'secanja', 'secanca', 'traži', 'trazi', 'ponavljam', 'ponavljati', 'ponovi'}
 _SECRET_RE = re.compile(r'\b(?:sk-[A-Za-z0-9_-]{12,}|sk-or-v1-[A-Za-z0-9_-]{12,}|[A-Za-z0-9_]*(?:api[_-]?key|token|secret)[A-Za-z0-9_]*\s*[:=]\s*\S+)', re.IGNORECASE)
 _NOISY_MEMORY_RE = re.compile(
     r'(##\s*summary|###\s*situacija|the user sent an image|the user sent a voice message|selfie photo|personal trust|'
@@ -55,6 +55,19 @@ _NOISY_MEMORY_RE = re.compile(
     re.IGNORECASE,
 )
 _LOW_VALUE_FACT_RE = re.compile(r'(dobra pitanje|refaktorisao live brain|evo kako bih|na osnovu memory context)', re.IGNORECASE)
+_SYNTHETIC_MEMORY_RE = re.compile(r'\b(?:ack-seed|ack-infer|live_brain_human_memory_seed|memory_sync_fix_test|lbmemsync-|hmem-|kestrel\s+harbor|live_brain_capability_e2e|upamti\s+ovo\s+kao\s+stvarno\s+pravilo)\b', re.IGNORECASE)
+_RECALL_QUERY_WORDS = {'gde', 'gdje', 'dje', 'dokle', 'stali', 'stao', 'stala', 'ostali', 'dosli', 'došli', 'rekao', 'rekla', 'rekli', 'told', 'where', 'were', 'leave', 'left', 'off', 'odgovori', 'odgovor', 'sećanja', 'secanja', 'traži', 'trazi', 'ponavljam', 'ponovi'}
+_CONTINUATION_QUERY_RE = re.compile(
+    r'\b(?:gde|gdje|đe|dje|dokle|where)\b.{0,80}\b(?:stali|stao|stala|ostali|došli|dosli|were|left|off)\b|'
+    r'\b(?:šta|sta|što|sto|what)\b.{0,80}\b(?:rekao|rekla|rekli|told|radili|radimo|dogovorili)\b|'
+    r'\b(?:nastavi|continue|where\s+were\s+we|where\s+did\s+we\s+leave\s+off)\b',
+    re.IGNORECASE | re.DOTALL,
+)
+_MUSIC_MEMORY_ALIASES = (
+    'pesm', 'pjesm', 'song', 'songs', 'music', 'muzik', 'cover', 'flamenco',
+    'triler', 'trileri', 'trilerima', 'serbezovski', 'esmeralda', 'lyrics',
+    'romska', 'romski', 'spanski', 'španski', 'spanish', 'gitar', 'gitara', 'reference', 'referenca',
+)
 _RUN_MARKER_RE = re.compile(r'\b(?:run|lbcap|codename)[-_][a-z0-9]+\b', re.IGNORECASE)
 _DESTRUCTIVE_MEMORY_RE = re.compile(r'\b(?:izbriši|izbrisi|obriši|obrisi|briši|brisi|delete|remove|rm)\b', re.IGNORECASE)
 _NEGATED_DESTRUCTIVE_RE = re.compile(r"\b(?:ne|nemoj|never|do\s+not|don'?t|dont)\s+(?:da\s+)?(?:izbriši|izbrisi|obriši|obrisi|briši|brisi|delete|remove|rm)\b", re.IGNORECASE)
@@ -77,6 +90,7 @@ _SECTION_LIMITS = {
     'RECENT EPISODES': 3,
     'PENDING APPROVAL': 3,
     'EPISTEMIC STATUS': 8,
+    'CONTINUITY MEMORY': 5,
 }
 _LAST_CONTEXT_METADATA: Dict[str, Any] = {'recipe_ids': []}
 _AUTO_SURFACE_PENDING_APPROVALS = True
@@ -352,6 +366,8 @@ def _is_low_signal_episode(title: str, summary: str) -> bool:
 def _is_noisy_memory(text: str) -> bool:
     if not text:
         return True
+    if _SYNTHETIC_MEMORY_RE.search(text):
+        return True
     if is_noisy_episode_memory(text, text):
         return True
     lowered = text.lower().strip()
@@ -457,8 +473,43 @@ def _is_destructive_memory_text(text: str) -> bool:
     return bool(_DESTRUCTIVE_MEMORY_RE.search(text or ''))
 
 
+def _is_continuation_query(text: str) -> bool:
+    return bool(_CONTINUATION_QUERY_RE.search(text or ''))
+
+
+def _is_question_like_memory(text: str) -> bool:
+    lowered = re.sub(r'\s+', ' ', (text or '').strip().lower())
+    if not lowered:
+        return False
+    if lowered.endswith('?'):
+        return True
+    return bool(re.match(r'^(?:kako|šta|sta|gde|gdje|koji|koja|what|which|where)\b', lowered))
+
+
+def _expand_query_words(words: List[str]) -> List[str]:
+    expanded: List[str] = []
+    for word in words:
+        value = (word or '').lower().strip('.,!?;:…')
+        if not value or value in _LOW_SIGNAL_WORDS or value in _RECALL_QUERY_WORDS:
+            continue
+        expanded.append(value)
+        if value.startswith(('pesm', 'pjesm')) or value in {'song', 'songs', 'music', 'muzika', 'muziku', 'cover'}:
+            expanded.extend(_MUSIC_MEMORY_ALIASES)
+        elif value == 'suno':
+            expanded.extend(('suno', *_MUSIC_MEMORY_ALIASES))
+        elif value.startswith(('muzik', 'triler', 'flamenco', 'serbez', 'esmeralda')):
+            expanded.extend(_MUSIC_MEMORY_ALIASES)
+    deduped: List[str] = []
+    seen = set()
+    for value in expanded:
+        if value and value not in seen:
+            seen.add(value)
+            deduped.append(value)
+    return deduped
+
+
 def _meaningful_query_words(words: List[str]) -> List[str]:
-    return [w for w in words if w not in _LOW_SIGNAL_WORDS]
+    return _expand_query_words(words)
 
 
 def _row_text(row: sqlite3.Row, fields: List[str]) -> str:
@@ -505,21 +556,44 @@ def _domain_conflicts(query_text: str, row_text: str) -> bool:
     return False
 
 
-def _has_overlap(row: sqlite3.Row, query_words: List[str], fields: List[str]) -> bool:
+def _overlap_score(row: sqlite3.Row, query_words: List[str], fields: List[str]) -> int:
     words = _meaningful_query_words(query_words)
     if not words:
-        return True
+        return 1
     text = _row_text(row, fields)
     query_text = ' '.join(query_words)
-    if _marker_conflicts(query_text, text):
-        return False
-    if _domain_conflicts(query_text, text):
-        return False
+    if _marker_conflicts(query_text, text) or _domain_conflicts(query_text, text):
+        return 0
     if any(alias in words for alias in IMAGE_GENERATION_ALIASES):
-        return any(alias in text for alias in IMAGE_GENERATION_ALIASES)
+        return 1 if any(alias in text for alias in IMAGE_GENERATION_ALIASES) else 0
     if 'ffmpeg' in words:
-        return 'ffmpeg' in text
-    return any(w in text for w in words)
+        return 1 if 'ffmpeg' in text else 0
+    return sum(1 for word in words if word in text)
+
+
+def _has_overlap(row: sqlite3.Row, query_words: List[str], fields: List[str]) -> bool:
+    return _overlap_score(row, query_words, fields) > 0
+
+
+def _row_updated_at(row: sqlite3.Row) -> float:
+    try:
+        return float(row['updated_at'] or 0)
+    except Exception:
+        return 0.0
+
+
+def _same_user_message(row: sqlite3.Row, user_message: str, fields: List[str]) -> bool:
+    needle = re.sub(r'\W+', ' ', (user_message or '').lower()).strip()
+    if not needle:
+        return False
+    for field in fields:
+        try:
+            value = re.sub(r'\W+', ' ', str(row[field] or '').lower()).strip()
+        except Exception:
+            value = ''
+        if value and (value == needle or value.startswith(needle[:120]) or needle.startswith(value[:120])):
+            return True
+    return False
 
 
 def _artifact_required(tool_used: str) -> bool:
@@ -683,6 +757,7 @@ def _load_live_brain_context(user_message: str, session_id: str, sender_id: str)
     now = time.time()
     ttl_cutoff = now - _CONSTRAINT_TTL_DAYS * 86400
     query_lower = (user_message or "").lower()
+    continuation_query = _is_continuation_query(user_message or "")
     query_words = [w for w in re.findall(r'[\w./-]+', query_lower) if len(w) > 3]
     active_tags = _active_tags(user_message, scope_key)
     _LAST_CONTEXT_METADATA['recipe_ids'] = []
@@ -708,22 +783,46 @@ def _load_live_brain_context(user_message: str, session_id: str, sender_id: str)
 
         # 2. Active work item (non-chit-chat)
         work_item_row = conn.execute(
-            "SELECT title, status, root_cause, next_step, evidence_json, scope_tags_json FROM work_items WHERE scope_key=? AND title NOT LIKE 'sumarizuj%' AND title NOT LIKE 'what did you do%' ORDER BY CASE WHEN status='active' THEN 0 WHEN status='blocked' THEN 1 ELSE 2 END, priority DESC, updated_at DESC LIMIT 10",
+            "SELECT title, status, root_cause, next_step, evidence_json, scope_tags_json, updated_at FROM work_items WHERE scope_key=? AND title NOT LIKE 'sumarizuj%' AND title NOT LIKE 'what did you do%' ORDER BY CASE WHEN status='active' THEN 0 WHEN status='blocked' THEN 1 ELSE 2 END, priority DESC, updated_at DESC LIMIT 50",
             (scope_key,),
         ).fetchall()
         scoped_work_rows = [r for r in work_item_row if _matches(r, active_tags, scope_key) and not _row_noisy(r, ['title', 'root_cause', 'next_step', 'evidence_json'])]
+        if continuation_query:
+            scoped_work_rows = [
+                r for r in scoped_work_rows
+                if not _same_user_message(r, user_message or '', ['title'])
+                and not _is_continuation_query(str(r['title'] or ''))
+                and not (_is_question_like_memory(str(r['title'] or '')) and not any(alias in str(r['title'] or '').lower() for alias in _MUSIC_MEMORY_ALIASES))
+                and not _SYNTHETIC_MEMORY_RE.search(_row_text(r, ['title', 'root_cause', 'next_step', 'evidence_json']))
+            ]
         overlapped_work_rows = [r for r in scoped_work_rows if _has_overlap(r, query_words, ['title', 'root_cause', 'next_step', 'evidence_json'])]
-        work_item_row = (overlapped_work_rows or ([] if _meaningful_query_words(query_words) else scoped_work_rows))
+        continuity_work_rows = []
+        if continuation_query and overlapped_work_rows:
+            ranked_work_rows = sorted(
+                overlapped_work_rows,
+                key=lambda r: (_overlap_score(r, query_words, ['title', 'root_cause', 'next_step', 'evidence_json']), _row_updated_at(r)),
+                reverse=True,
+            )
+            seen_titles = set()
+            for row in list(overlapped_work_rows[:2]) + ranked_work_rows:
+                title_key = (row['title'] or '').strip().lower()
+                if title_key and title_key not in seen_titles:
+                    seen_titles.add(title_key)
+                    continuity_work_rows.append(row)
+                if len(continuity_work_rows) >= _SECTION_LIMITS.get('CONTINUITY MEMORY', 5):
+                    break
+        work_candidates = overlapped_work_rows if continuation_query else overlapped_work_rows
+        work_item_row = (work_candidates or ([] if _meaningful_query_words(query_words) else scoped_work_rows))
         work_item_row = work_item_row[0] if work_item_row else None
 
         # 3. Active episodes — max 3, no chit-chat, summarized to 1 line
         episode_rows = conn.execute(
-            "SELECT title, current_summary, scope_tags_json FROM episodes WHERE status IN ('active','dormant') AND length(current_summary) > 20 ORDER BY updated_at DESC LIMIT 80",
+            "SELECT title, current_summary, scope_tags_json, updated_at FROM episodes WHERE status IN ('active','dormant') AND length(current_summary) > 20 ORDER BY updated_at DESC LIMIT 120",
         ).fetchall()
 
         # 4. Validated facts — atomic, max 200 chars, deduped
         fact_rows = conn.execute(
-            "SELECT DISTINCT fact_text, scope_tags_json, scope_key FROM facts WHERE status='active' AND confidence >= 0.75 ORDER BY CASE WHEN scope_key=? THEN 0 ELSE 1 END, valid_from DESC LIMIT 30",
+            "SELECT DISTINCT fact_text, scope_tags_json, scope_key, valid_from FROM facts WHERE status='active' AND confidence >= 0.75 ORDER BY CASE WHEN scope_key=? THEN 0 ELSE 1 END, valid_from DESC LIMIT 120",
             (scope_key,),
         ).fetchall()
 
@@ -901,6 +1000,16 @@ def _load_live_brain_context(user_message: str, session_id: str, sender_id: str)
             lines.append(f"Root cause: {_truncate_fact(root_cause)}")
         _append_section(parts, "ACTIVE TASK", ["; ".join(lines)])
 
+    if continuation_query and continuity_work_rows:
+        continuity_lines = []
+        for row in continuity_work_rows:
+            title = (row['title'] or '').strip()
+            if not title or _is_continuation_query(title) or _is_question_like_memory(title) and not any(alias in title.lower() for alias in _MUSIC_MEMORY_ALIASES):
+                continue
+            continuity_lines.append(f"User previously said: {_truncate_fact(title)}")
+        if continuity_lines:
+            _append_section(parts, "CONTINUITY MEMORY", continuity_lines)
+
     # ACTIVE EPISODES — max 3, 1 line each, no chit-chat.
     # If an episode summary is noisy but the title itself matches the query,
     # keep the clean title as a title-only hint instead of dropping the memory.
@@ -909,6 +1018,10 @@ def _load_live_brain_context(user_message: str, session_id: str, sender_id: str)
         if _is_chit_chat(r['title']) or not r['current_summary']:
             continue
         if not _matches(r, active_tags, scope_key):
+            continue
+        if continuation_query and (_same_user_message(r, user_message or '', ['title']) or _is_continuation_query(_row_text(r, ['title', 'current_summary'])) or (_is_question_like_memory(str(r['title'] or '')) and not any(alias in str(r['title'] or '').lower() for alias in _MUSIC_MEMORY_ALIASES))):
+            continue
+        if _SYNTHETIC_MEMORY_RE.search(_row_text(r, ['title', 'current_summary'])):
             continue
         title_overlap = _has_overlap(r, query_words, ['title'])
         full_overlap = _has_overlap(r, query_words, ['title', 'current_summary'])
@@ -930,6 +1043,8 @@ def _load_live_brain_context(user_message: str, session_id: str, sender_id: str)
             continue
         useful_episodes.append((r, noisy_summary))
     if useful_episodes:
+        if continuation_query:
+            useful_episodes.sort(key=lambda item: (_overlap_score(item[0], query_words, ['title', 'current_summary']), _row_updated_at(item[0])), reverse=True)
         ep_lines = []
         for r, noisy_summary in useful_episodes:
             title = (r['title'] or '')[:60]
@@ -941,7 +1056,7 @@ def _load_live_brain_context(user_message: str, session_id: str, sender_id: str)
 
     # VALIDATED FACTS — atomic, max 200 chars
     if fact_rows:
-        facts = [_truncate_fact(r['fact_text']) for r in fact_rows if r['fact_text'] and not _SECRET_RE.search(r['fact_text']) and not _is_noisy_memory(r['fact_text']) and not _domain_conflicts(query_lower, r['fact_text']) and _visible_fact_matches(r['fact_text'], query_words) and _matches(r, active_tags, scope_key) and _has_overlap(r, query_words, ['fact_text'])]
+        facts = [_truncate_fact(r['fact_text']) for r in fact_rows if r['fact_text'] and not _SECRET_RE.search(r['fact_text']) and not _is_noisy_memory(r['fact_text']) and not _is_question_like_memory(r['fact_text']) and not _domain_conflicts(query_lower, r['fact_text']) and _visible_fact_matches(r['fact_text'], query_words) and _matches(r, active_tags, scope_key) and _has_overlap(r, query_words, ['fact_text'])]
         if facts:
             _append_section(parts, "KNOWN FACTS", facts)
 

@@ -124,7 +124,7 @@ def _markers_conflict(left: str, right: str) -> bool:
 
 def _root_cause_relevant(user_text: str, claim_text: str) -> bool:
     lowered = (claim_text or '').lower()
-    if 'codename' in lowered:
+    if re.search(r'\b(?:codename|run|lbcap)[-_ ][a-z0-9]+\b', lowered):
         return False
     if _markers_conflict(user_text, claim_text):
         return False
@@ -150,10 +150,30 @@ def _first_useful_sentence(text: str, max_len: int = 220) -> str:
     return cleaned
 
 
+def _is_question_or_recall_memory(text: str) -> bool:
+    value = (text or '').strip()
+    if not value:
+        return False
+    return bool(MEMORY_QUESTION_RE.search(value) or RECALL_MEMORY_RE.search(value))
+
+
 def _implicit_workflow_fact(text: str) -> str:
-    if not text or not WORKFLOW_INSTRUCTION_RE.search(text) or not _has_operational_signal(text):
+    if not text or _is_question_or_recall_memory(text):
+        return ''
+    if not WORKFLOW_INSTRUCTION_RE.search(text) or not _has_operational_signal(text):
         return ''
     return _first_useful_sentence(text)
+
+
+def _implicit_project_memory_fact(text: str) -> str:
+    if not text or _is_question_or_recall_memory(text):
+        return ''
+    if not PROJECT_CONTINUITY_RE.search(text):
+        return ''
+    fact = _first_useful_sentence(text)
+    if len(fact) < 12 or LOW_VALUE_THREAD_RE.match(fact):
+        return ''
+    return fact
 
 
 def _assistant_action_fact(text: str) -> str:
@@ -233,6 +253,21 @@ EXPLICIT_MEMORY_STOP_RE = re.compile(
 OPERATIONAL_MEMORY_RE = re.compile(
     r'\b(?:suno|brave|browser|remote\s+debugging|9222|cookies?|kolačić|kolacic|telegram|gateway|hermes|atlantis|live\s*brain|plugin|tool|api|login|oauth|session|sqlite|db|database|ffmpeg|image|video|audio|artifact|file|path)\b',
     re.IGNORECASE,
+)
+PROJECT_CONTINUITY_RE = re.compile(
+    r'\b(?:pravimo|radimo|ho[cć]u|zelim|želim|probaj|pokušaj|pokusaj|isti\s+te(?:k|x)st|tekst|text|lyrics|'
+    r'cover|pesm|pjesm|muzik|suno|flamenco|triler|trileri|trilerima|serbezovski|esmeralda|'
+    r'referenc(?:a|e)|romska|romski|gitara|gitarom)\b',
+    re.IGNORECASE,
+)
+MEMORY_QUESTION_RE = re.compile(
+    r'(^\s*(?:kako|šta|sta|gde|gdje|koji|koja|what|which|where)\b|\?)',
+    re.IGNORECASE,
+)
+RECALL_MEMORY_RE = re.compile(
+    r'\b(?:gde|gdje|dje|dokle|where)\b.{0,80}\b(?:stali|stao|stala|ostali|left|off)\b|'
+    r'\b(?:šta|sta|what)\b.{0,80}\b(?:rekao|rekla|rekli|told|radili|radimo)\b',
+    re.IGNORECASE | re.DOTALL,
 )
 WORKFLOW_INSTRUCTION_RE = re.compile(
     r'\b(?:koristi(?:mo|ti)?|koristimo|use|using|radi(?:mo)?\s+(?:preko|sa)|workflow|proces|prijav(?:a|ili|ljuj)|login|connect|poveži|povezi)\b',
@@ -736,6 +771,22 @@ class Ingestor:
                 "fact_text": _canonical_fact_text(implicit_workflow),
                 "confidence": 0.84,
                 "source_kind": "implicit_user_workflow",
+                "valid_from": created_at,
+                "valid_to": None,
+                "status": "active",
+                "evidence_count": 1,
+                "session_id": session_id,
+                "scope_key": scope_key,
+                "scope_tags_json": tags_to_json(scope_tags),
+            })
+        project_memory = _implicit_project_memory_fact(user_text)
+        if project_memory and project_memory != implicit_workflow:
+            facts.append({
+                "fact_id": _fact_id('work_continuity_memory', project_memory, scope_key),
+                "fact_type": "work_continuity_memory",
+                "fact_text": _canonical_fact_text(project_memory),
+                "confidence": 0.80,
+                "source_kind": "implicit_user_work",
                 "valid_from": created_at,
                 "valid_to": None,
                 "status": "active",
