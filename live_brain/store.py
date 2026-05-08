@@ -373,6 +373,7 @@ class LiveBrainStore:
                 error_type TEXT NOT NULL DEFAULT '',
                 artifact_verified INTEGER NOT NULL DEFAULT 0,
                 artifact_path TEXT NOT NULL DEFAULT '',
+                duration_ms INTEGER NOT NULL DEFAULT 0,
                 created_at REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_tool_results_tool ON tool_results(tool_name, created_at DESC);
@@ -529,6 +530,7 @@ class LiveBrainStore:
             ('error_type', 'TEXT', "''"),
             ('artifact_verified', 'INTEGER', '0'),
             ('artifact_path', 'TEXT', "''"),
+            ('duration_ms', 'INTEGER', '0'),
         ]:
             self._add_column_if_missing('tool_results', col, f"{dtype} NOT NULL DEFAULT {default}")
         for col, dtype, default in [

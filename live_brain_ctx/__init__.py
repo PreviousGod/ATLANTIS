@@ -1447,7 +1447,7 @@ def _latest_tool_context(conn: sqlite3.Connection, session_id: str, created_at: 
     return '', ''
 
 
-def _record_tool_result(tool_name: str, args: Any, result: Any, session_id: str = '', tool_call_id: str = '') -> None:
+def _record_tool_result(tool_name: str, args: Any, result: Any, session_id: str = '', tool_call_id: str = '', duration_ms: int | None = None) -> None:
     db_path = _db_path()
     if not tool_name or not Path(db_path).exists():
         return
@@ -1457,6 +1457,10 @@ def _record_tool_result(tool_name: str, args: Any, result: Any, session_id: str 
         conn = sqlite3.connect(db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
         conn.execute('PRAGMA busy_timeout=10000')
+        try:
+            duration_ms = max(0, int(duration_ms or 0))
+        except (TypeError, ValueError):
+            duration_ms = 0
         scope_key, user_text = _latest_tool_context(conn, session_id, created_at)
         if not scope_key:
             scope_key = _extract_scope_key(user_text, '', session_id)
@@ -1470,6 +1474,7 @@ def _record_tool_result(tool_name: str, args: Any, result: Any, session_id: str 
             scope_key=scope_key,
             user_text=user_text,
             created_at=created_at,
+            duration_ms=duration_ms,
         )
         result_text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
         success = True
@@ -1491,6 +1496,7 @@ def _record_tool_result(tool_name: str, args: Any, result: Any, session_id: str 
                 'result': result_text[:4000],
                 'success': success,
                 'tool_call_id': tool_call_id,
+                'duration_ms': duration_ms,
                 'user_message': user_text,
             },
             session_id=session_id,
@@ -1569,6 +1575,7 @@ def _post_tool_call(**kwargs):
         kwargs.get('result'),
         session_id=str(kwargs.get('session_id') or ''),
         tool_call_id=str(kwargs.get('tool_call_id') or ''),
+        duration_ms=kwargs.get('duration_ms'),
     )
     return None
 

@@ -379,6 +379,7 @@ def main() -> None:
             result=json.dumps({'success': True, 'image': str(hook_artifact)}),
             session_id='s',
             tool_call_id='call-success',
+            duration_ms=123,
         )
         ctx._post_tool_call(
             tool_name='image_generate',
@@ -389,11 +390,11 @@ def main() -> None:
         )
         hook_conn = sqlite3.connect(hook_db)
         hook_conn.row_factory = sqlite3.Row
-        ok = hook_conn.execute("SELECT success, artifact_verified, artifact_path FROM tool_results WHERE tool_name='image_generate' AND success=1").fetchone()
+        ok = hook_conn.execute("SELECT success, artifact_verified, artifact_path, duration_ms FROM tool_results WHERE tool_name='image_generate' AND success=1").fetchone()
         bad = hook_conn.execute("SELECT success, error_type FROM tool_results WHERE tool_name='image_generate' AND success=0").fetchone()
         activation = hook_conn.execute("SELECT tool_used, artifact_verified, success FROM causal_activations WHERE scope_key='agent:main:telegram:dm:hook' AND success=1").fetchone()
         hook_conn.close()
-        assert ok and ok['artifact_verified'] == 1 and ok['artifact_path'] == str(hook_artifact)
+        assert ok and ok['artifact_verified'] == 1 and ok['artifact_path'] == str(hook_artifact) and ok['duration_ms'] == 123
         assert bad and bad['error_type'] in {'auth', 'not_found'}
         assert activation and activation['tool_used'] == 'image_generate' and activation['artifact_verified'] == 1 and activation['success'] == 1
     if old_home is None:

@@ -351,7 +351,7 @@ class Ingestor:
                 return canonical
         return tool
 
-    def store_tool_result_event(self, tool_name: str, args: Any, result: Any, *, session_id: str = '', tool_call_id: str = '', scope_key: str = '', user_text: str = '', created_at: float | None = None) -> dict:
+    def store_tool_result_event(self, tool_name: str, args: Any, result: Any, *, session_id: str = '', tool_call_id: str = '', scope_key: str = '', user_text: str = '', created_at: float | None = None, duration_ms: int | None = None) -> dict:
         """Canonical runtime ingestion for post_tool_call events."""
         created_at = created_at or time.time()
         payload, result_text = self._json_payload(result)
@@ -360,13 +360,17 @@ class Ingestor:
         args_template = self._args_template_from_event(tool_name, args if isinstance(args, dict) else {}, payload, result_text)
         artifact_verified, artifact_path = self._verify_artifact(tool_name, args_template, result_text)
         error_type = self._classify_error(error or result_text if not success else '')
+        try:
+            duration_ms = max(0, int(duration_ms or 0))
+        except (TypeError, ValueError):
+            duration_ms = 0
         identity = tool_call_id or f'{session_id}:{created_at:.6f}'
         result_id = f"tool_result:{stable_hash(tool_name, identity, result_text[:500])[:24]}"
         self.conn.execute(
             """INSERT OR REPLACE INTO tool_results
-            (result_id, tool_name, success, error, error_type, artifact_verified, artifact_path, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (result_id, tool_name, 1 if success else 0, error[:200] if error else None, error_type, 1 if artifact_verified else 0, artifact_path[:240], created_at),
+            (result_id, tool_name, success, error, error_type, artifact_verified, artifact_path, duration_ms, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (result_id, tool_name, 1 if success else 0, error[:200] if error else None, error_type, 1 if artifact_verified else 0, artifact_path[:240], duration_ms, created_at),
         )
         if scope_key and user_text and tool_name:
             self._record_causal_activation(
@@ -389,6 +393,7 @@ class Ingestor:
             'error_type': error_type,
             'artifact_verified': artifact_verified,
             'artifact_path': artifact_path,
+            'duration_ms': duration_ms,
             'scope_key': scope_key,
         }
 

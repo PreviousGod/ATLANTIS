@@ -349,6 +349,31 @@ class LiveBrainProvider(MemoryProvider):
 
         threading.Thread(target=_sync, daemon=True, name="live-brain-sync").start()
 
+    def on_session_switch(self, new_session_id: str, *, parent_session_id: str = "", reset: bool = False, **kwargs) -> None:
+        if not new_session_id:
+            return
+        self._session_id = new_session_id
+        user_id = str(kwargs.get("user_id") or self._user_id or "")
+        gateway_session_key = str(kwargs.get("gateway_session_key") or self._gateway_session_key or "")
+        self._user_id = user_id
+        self._gateway_session_key = gateway_session_key
+        self._scope_key = gateway_session_key or user_id or self._session_id
+        if self._research:
+            self._research.session_id = self._session_id
+            self._research.scope_key = self._scope_key
+        if self._epistemic:
+            self._epistemic.session_id = self._session_id
+            self._epistemic.scope_key = self._scope_key
+        if reset:
+            self._turn_count = 0
+        if self._store:
+            now = time.time()
+            self._store.conn.execute(
+                "INSERT OR REPLACE INTO sessions (session_id, platform, agent_identity, agent_context, user_id, gateway_session_key, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (self._session_id, self._platform, self._agent_identity, self._agent_context, self._user_id, self._gateway_session_key, now),
+            )
+            self._store.conn.commit()
+
     def on_pre_compress(self, messages: list) -> str:
         if not self._compression:
             return ""
@@ -359,12 +384,15 @@ class LiveBrainProvider(MemoryProvider):
             return
         self._compression.finalize_session(self._session_id, self._scope_key, time.time())
 
-    def on_memory_write(self, action: str, target: str, content: str) -> None:
+    def on_memory_write(self, action: str, target: str, content: str, metadata: Dict[str, Any] | None = None) -> None:
         if not self._store or not self._ingestor or action not in ("add", "replace") or not content:
             return
-        self._ingestor.mirror_memory_write(target=target, content=content, created_at=time.time(), session_id=self._session_id, scope_key=self._scope_key)
+        metadata = metadata or {}
+        session_id = str(metadata.get("session_id") or self._session_id)
+        scope_key = self._scope_key
+        self._ingestor.mirror_memory_write(target=target, content=content, created_at=time.time(), session_id=session_id, scope_key=scope_key)
 
-    def on_delegation(self, task: str, result: str, *, child_session_id: str) -> None:
+    def on_delegation(self, task: str, result: str, *, child_session_id: str = "", **kwargs) -> None:
         if not self._store or not self._ingestor:
             return
         self._ingestor.ingest_delegation(task=task, result=result, child_session_id=child_session_id, created_at=time.time(), session_id=self._session_id, scope_key=self._scope_key)
