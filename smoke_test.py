@@ -20,6 +20,7 @@ def main() -> int:
     run('tests/live_brain_epistemic_test.py')
     run('tests/live_brain_epistemic_e2e.py')
     run('tests/live_brain_mempalace_benchmark_test.py')
+    run('tests/live_brain_automatic_memory_test.py')
     run('tests/live_brain_eval.py', '--verbose')
     return 0
 

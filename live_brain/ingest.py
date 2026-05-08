@@ -131,6 +131,39 @@ def _root_cause_relevant(user_text: str, claim_text: str) -> bool:
     return True
 
 
+def _has_operational_signal(text: str) -> bool:
+    return bool(OPERATIONAL_MEMORY_RE.search(text or '') or FILE_RE.search(text or ''))
+
+
+def _first_useful_sentence(text: str, max_len: int = 220) -> str:
+    cleaned = re.sub(r'\s+', ' ', (text or '')).strip()
+    if not cleaned:
+        return ''
+    parts = re.split(r'(?<=[.!?])\s+', cleaned)
+    for part in parts:
+        part = part.strip(' -•*')
+        if len(part) >= 12:
+            cleaned = part
+            break
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len].rsplit(' ', 1)[0].rstrip(' ,;:') + '…'
+    return cleaned
+
+
+def _implicit_workflow_fact(text: str) -> str:
+    if not text or not WORKFLOW_INSTRUCTION_RE.search(text) or not _has_operational_signal(text):
+        return ''
+    return _first_useful_sentence(text)
+
+
+def _assistant_action_fact(text: str) -> str:
+    if not text or ASSISTANT_RECALL_META_RE.search(text):
+        return ''
+    if not ASSISTANT_ACTION_RE.search(text) or not _has_operational_signal(text):
+        return ''
+    return _first_useful_sentence(text)
+
+
 def _extract_explicit_memory_facts(text: str) -> List[str]:
     if not text or not PERSISTENT_PREF_RE.search(text):
         return []
@@ -196,6 +229,22 @@ VALIDATION_RE = re.compile(r'\b(verified|confirmed|reproduced|works now|radi sad
 EXPLICIT_MEMORY_STOP_RE = re.compile(
     r'\b(?:odgovori|respond|ne\s+izvodi|nemoj\s+zaklju[cč]|do\s+not\s+infer)\b.*$',
     re.IGNORECASE | re.DOTALL,
+)
+OPERATIONAL_MEMORY_RE = re.compile(
+    r'\b(?:suno|brave|browser|remote\s+debugging|9222|cookies?|kolačić|kolacic|telegram|gateway|hermes|atlantis|live\s*brain|plugin|tool|api|login|oauth|session|sqlite|db|database|ffmpeg|image|video|audio|artifact|file|path)\b',
+    re.IGNORECASE,
+)
+WORKFLOW_INSTRUCTION_RE = re.compile(
+    r'\b(?:koristi(?:mo|ti)?|koristimo|use|using|radi(?:mo)?\s+(?:preko|sa)|workflow|proces|prijav(?:a|ili|ljuj)|login|connect|poveži|povezi)\b',
+    re.IGNORECASE,
+)
+ASSISTANT_ACTION_RE = re.compile(
+    r'\b(?:uradio sam|pokrenuo sam|otvorio sam|kliknuo sam|povezao sam|koristio sam|proverio sam|testirao sam|poslao sam|restartovao sam|instalirao sam|sačuvao sam|sacuvao sam|created|saved|opened|clicked|used|connected|tested|restarted|installed|sent|verified)\b',
+    re.IGNORECASE,
+)
+ASSISTANT_RECALL_META_RE = re.compile(
+    r'\b(?:prema pamćenju|prema pamcenju|iz sećanja|iz secanja|na osnovu memorije|from memory|according to memory)\b',
+    re.IGNORECASE,
 )
 EXPLICIT_MEMORY_RULE_RE = re.compile(r'\b(?:pravilo|rule)[^:]*:\s*(.+)$', re.IGNORECASE | re.DOTALL)
 EXPLICIT_MEMORY_NUMBERED_RE = re.compile(
@@ -314,6 +363,34 @@ class Ingestor:
             return True, ''
         return True, ''
 
+    def _payload_summary(self, payload: Any, result_text: str) -> str:
+        if isinstance(payload, dict):
+            parts = []
+            for key in ('url', 'title', 'message', 'status', 'output', 'path', 'image', 'audio', 'video'):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    parts.append(f"{key}={value.strip()[:90]}")
+                if len(parts) >= 3:
+                    break
+            if parts:
+                return '; '.join(parts)
+        return _first_useful_sentence(result_text, max_len=140)
+
+    def _tool_action_fact_text(self, user_text: str, tool_name: str, args_template: Dict[str, Any], payload: Any, result_text: str, artifact_path: str = '') -> str:
+        if not user_text or not tool_name:
+            return ''
+        combined = f"{user_text} {tool_name} {json.dumps(args_template, ensure_ascii=False, default=str)} {result_text}"
+        if not _has_operational_signal(combined):
+            return ''
+        task = _first_useful_sentence(user_text, max_len=120)
+        summary = self._payload_summary(payload, result_text)
+        parts = [f"For task '{task}', agent successfully used tool {tool_name}"]
+        if artifact_path:
+            parts.append(f"artifact={artifact_path[:120]}")
+        elif summary:
+            parts.append(summary)
+        return '; '.join(parts)
+
     def _args_template_from_event(self, tool_name: str, args: Any, payload: Any, result_text: str) -> Dict[str, Any]:
         template: Dict[str, Any] = {'tool': tool_name}
         if isinstance(args, dict):
@@ -385,6 +462,24 @@ class Ingestor:
                 artifact_path=artifact_path,
                 created_at=created_at,
             )
+            if success:
+                action_fact = self._tool_action_fact_text(user_text, tool_name, args_template, payload, result_text, artifact_path)
+                if action_fact:
+                    self._upsert_fact({
+                        "fact_id": _fact_id('tool_action_memory', action_fact, scope_key),
+                        "subject_entity_id": None,
+                        "fact_type": "tool_action_memory",
+                        "fact_text": _canonical_fact_text(action_fact),
+                        "confidence": 0.86,
+                        "source_kind": "post_tool_call_action",
+                        "valid_from": created_at,
+                        "valid_to": None,
+                        "status": "active",
+                        "evidence_count": 1,
+                        "session_id": session_id,
+                        "scope_key": scope_key,
+                        "scope_tags_json": tags_to_json(extract_scope_tags(user_text, result_text, scope_key=scope_key)),
+                    })
         self.conn.commit()
         return {
             'result_id': result_id,
@@ -633,6 +728,38 @@ class Ingestor:
                     "scope_key": scope_key,
                     "scope_tags_json": tags_to_json(scope_tags),
                 })
+        implicit_workflow = _implicit_workflow_fact(user_text)
+        if implicit_workflow:
+            facts.append({
+                "fact_id": _fact_id('implicit_workflow', implicit_workflow, scope_key),
+                "fact_type": "workflow_instruction",
+                "fact_text": _canonical_fact_text(implicit_workflow),
+                "confidence": 0.84,
+                "source_kind": "implicit_user_workflow",
+                "valid_from": created_at,
+                "valid_to": None,
+                "status": "active",
+                "evidence_count": 1,
+                "session_id": session_id,
+                "scope_key": scope_key,
+                "scope_tags_json": tags_to_json(scope_tags),
+            })
+        assistant_action = _assistant_action_fact(assistant_text)
+        if assistant_action:
+            facts.append({
+                "fact_id": _fact_id('assistant_action_report', assistant_action, scope_key),
+                "fact_type": "agent_action_report",
+                "fact_text": _canonical_fact_text(f"Agent reported: {assistant_action}"),
+                "confidence": 0.80,
+                "source_kind": "assistant_action_report",
+                "valid_from": created_at,
+                "valid_to": None,
+                "status": "active",
+                "evidence_count": 1,
+                "session_id": session_id,
+                "scope_key": scope_key,
+                "scope_tags_json": tags_to_json(scope_tags),
+            })
         if assistant_text and (VALIDATION_RE.search(assistant_text) or re.search(r'\b(user prefers|prefer[s]? .* for|use .* for|should use)\b', assistant_text, re.IGNORECASE)):
             facts.append({
                 "fact_id": _fact_id('assistant_validated', assistant_text, scope_key),
