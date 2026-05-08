@@ -225,6 +225,9 @@ class LiveBrainProvider(MemoryProvider):
         self._scope_key = ""
         self._turn_count = 0
         self._hermes_home = ""
+        self._db_path = ""
+        self._sync_threads: set[threading.Thread] = set()
+        self._sync_threads_lock = threading.Lock()
 
     @property
     def name(self) -> str:
@@ -237,6 +240,7 @@ class LiveBrainProvider(MemoryProvider):
         hermes_home = kwargs.get("hermes_home") or os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))
         self._hermes_home = hermes_home
         db_path = str(Path(hermes_home) / "live_brain" / "live_brain.db")
+        self._db_path = db_path
         self._session_id = session_id
         self._platform = kwargs.get("platform", "cli")
         self._agent_identity = kwargs.get("agent_identity", "")
@@ -312,42 +316,61 @@ class LiveBrainProvider(MemoryProvider):
         return
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        if not self._store or not self._ingestor:
+        if not self._db_path:
             return
+        session_id_snapshot = session_id or self._session_id
+        scope_key_snapshot = self._scope_key or session_id_snapshot
+        turn_index_snapshot = self._turn_count
+        db_path = self._db_path
 
         def _sync() -> None:
+            thread = threading.current_thread()
+            sync_store = None
             try:
                 created_at = time.time()
-                self._ingestor.ingest_turn(
-                    session_id=self._session_id,
-                    scope_key=self._scope_key,
-                    turn_index=self._turn_count,
+                sync_store = LiveBrainStore(db_path)
+                conn = sync_store.conn
+                ingestor = Ingestor(conn)
+                ingestor.ingest_turn(
+                    session_id=session_id_snapshot,
+                    scope_key=scope_key_snapshot,
+                    turn_index=turn_index_snapshot,
                     user_text=user_content,
                     assistant_text=assistant_content,
                     created_at=created_at,
                 )
-                # Derive scoped rules from repeated or explicit corrections.
-                if self._rules:
-                    self._rules.derive_binding_constraint_from_turn(user_content, self._session_id, self._scope_key)
-                    self._rules.derive_correction_constraint_from_turn(user_content, self._session_id, self._scope_key)
-                # Keep canonical recap updated incrementally, not only at session end.
-                if self._compression:
-                    row = self._store.conn.execute(
-                        "SELECT state_json FROM work_state WHERE scope_key = ?",
-                        (self._scope_key,),
-                    ).fetchone()
-                    state = json.loads(row[0]) if row and row[0] else {}
-                    self._compression.update_canonical_recap(self._session_id, self._scope_key, state, created_at)
-                    self._compression.crystallise_from_work_item(self._scope_key, created_at)
-                self._store.conn.commit()
+                rules = RuleEngine(conn)
+                rules.derive_binding_constraint_from_turn(user_content, session_id_snapshot, scope_key_snapshot)
+                rules.derive_correction_constraint_from_turn(user_content, session_id_snapshot, scope_key_snapshot)
+                compression = CompressionManager(conn)
+                row = conn.execute(
+                    "SELECT state_json FROM work_state WHERE scope_key = ?",
+                    (scope_key_snapshot,),
+                ).fetchone()
+                state = json.loads(row[0]) if row and row[0] else {}
+                compression.update_canonical_recap(session_id_snapshot, scope_key_snapshot, state, created_at)
+                compression.crystallise_from_work_item(scope_key_snapshot, created_at)
+                conn.commit()
             except Exception:
                 logger.exception("[live_brain] sync_turn failed")
                 try:
-                    self._store.conn.rollback()
+                    if sync_store:
+                        sync_store.conn.rollback()
                 except Exception:
                     pass
+            finally:
+                try:
+                    if sync_store:
+                        sync_store.close()
+                except Exception:
+                    pass
+                with self._sync_threads_lock:
+                    self._sync_threads.discard(thread)
 
-        threading.Thread(target=_sync, daemon=True, name="live-brain-sync").start()
+        thread = threading.Thread(target=_sync, daemon=True, name="live-brain-sync")
+        with self._sync_threads_lock:
+            self._sync_threads.add(thread)
+        thread.start()
 
     def on_session_switch(self, new_session_id: str, *, parent_session_id: str = "", reset: bool = False, **kwargs) -> None:
         if not new_session_id:
@@ -577,6 +600,17 @@ class LiveBrainProvider(MemoryProvider):
         return tool_error(f"Unknown tool: {tool_name}")
 
     def shutdown(self) -> None:
+        deadline = time.time() + 5.0
+        with self._sync_threads_lock:
+            threads = list(self._sync_threads)
+        current = threading.current_thread()
+        for thread in threads:
+            if thread is current:
+                continue
+            remaining = max(0.0, deadline - time.time())
+            if remaining <= 0:
+                break
+            thread.join(remaining)
         if self._store:
             self._store.close()
             self._store = None

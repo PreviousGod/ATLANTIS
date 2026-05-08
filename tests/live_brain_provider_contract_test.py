@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -35,7 +36,23 @@ def test_provider_handles_latest_session_switch_and_metadata_hooks() -> None:
                 metadata={'session_id': 'session:new', 'platform': 'compat'},
             )
             provider.on_delegation('contract task', 'contract result', child_session_id='child:1', extra='ignored')
+            provider.on_turn_start(1, 'remember how login happened')
+            provider.sync_turn(
+                'Jel se secas kako si se prijavio?',
+                'Use verified current session evidence before claiming remembered browser login history.',
+                session_id='session:new',
+            )
             provider.shutdown()
+
+            conn = sqlite3.connect(Path(tmp) / 'live_brain' / 'live_brain.db')
+            try:
+                stored = conn.execute(
+                    "SELECT session_id, user_text FROM turns WHERE session_id=? ORDER BY created_at DESC LIMIT 1",
+                    ('session:new',),
+                ).fetchone()
+                assert stored and 'Jel se secas' in stored[1]
+            finally:
+                conn.close()
         finally:
             if old_home is None:
                 os.environ.pop('HERMES_HOME', None)
