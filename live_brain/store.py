@@ -104,6 +104,46 @@ class LiveBrainStore:
             logger.warning("[live_brain] schema migration failed for %s.%s: %s", table, name, exc)
             raise
 
+    def _run_migrations(self) -> None:
+        """Run all pending migrations in order."""
+        # Create migrations tracking table
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                migration_id TEXT PRIMARY KEY,
+                applied_at REAL NOT NULL
+            )
+        """)
+
+        migrations_dir = Path(__file__).parent / "migrations"
+        if not migrations_dir.exists():
+            return
+
+        # Get already applied migrations
+        applied = {
+            row[0] for row in
+            self.conn.execute("SELECT migration_id FROM schema_migrations").fetchall()
+        }
+
+        # Apply pending migrations in order
+        for migration_file in sorted(migrations_dir.glob("*.sql")):
+            migration_id = migration_file.stem
+            if migration_id in applied:
+                continue
+
+            logger.info("[live_brain] applying migration %s", migration_id)
+            try:
+                sql = migration_file.read_text(encoding='utf-8')
+                self.conn.executescript(sql)
+                self.conn.execute(
+                    "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
+                    (migration_id, time.time())
+                )
+                self.conn.commit()
+            except Exception as exc:
+                logger.error("[live_brain] migration %s failed: %s", migration_id, exc)
+                self.conn.rollback()
+                raise
+
     def initialize_schema(self) -> None:
         self.conn.executescript(
             """
@@ -538,6 +578,10 @@ class LiveBrainStore:
             ('source', 'TEXT', "'compiler'"),
         ]:
             self._add_column_if_missing('context_impressions', col, f"{dtype} NOT NULL DEFAULT {default}")
+
+        # Run pending migrations
+        self._run_migrations()
+
         self.conn.commit()
 
     def record_memory_event(self, **kwargs: Any) -> str:

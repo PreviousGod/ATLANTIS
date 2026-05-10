@@ -204,6 +204,64 @@ SELF_EVOLUTION_SCHEMA = {
     }
 }
 
+ENTITY_GRAPH_SCHEMA = {
+    "name": "brain_entity_graph",
+    "description": "Traverse entity relationship graph to find related entities and synthesize cross-memory context.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["find_related", "synthesize", "add_relationship"]},
+            "entity_name": {"type": "string"},
+            "relationship_type": {"type": "string"},
+            "max_depth": {"type": "integer", "default": 2},
+            "target_entity": {"type": "string"}
+        },
+        "required": ["action", "entity_name"]
+    }
+}
+
+DIALECTIC_SCHEMA = {
+    "name": "brain_synthesize",
+    "description": "Synthesize reasoning across multiple sessions to find patterns or evolving understanding.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "max_sessions": {"type": "integer", "default": 5}
+        },
+        "required": ["query"]
+    }
+}
+
+USER_PROFILE_SCHEMA = {
+    "name": "brain_user_profile",
+    "description": "View or update user preferences, communication patterns, and feedback history.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["view", "add_preference", "list_patterns", "feedback_summary"]},
+            "preference_key": {"type": "string"},
+            "preference_value": {"type": "string"},
+            "preference_type": {"type": "string"}
+        },
+        "required": ["action"]
+    }
+}
+
+COMPOSE_QUERY_SCHEMA = {
+    "name": "brain_compose_query",
+    "description": "Compose algebraic queries to find memories (A + B - C).",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "add_concepts": {"type": "array", "items": {"type": "string"}},
+            "subtract_concepts": {"type": "array", "items": {"type": "string"}},
+            "top_k": {"type": "integer", "default": 5}
+        },
+        "required": ["add_concepts"]
+    }
+}
+
 
 class LiveBrainProvider(MemoryProvider):
     def __init__(self):
@@ -216,6 +274,10 @@ class LiveBrainProvider(MemoryProvider):
         self._epistemic = None
         self._artifacts = None
         self._rules = None
+        self._entity_graph = None
+        self._dialectic = None
+        self._user_alignment = None
+        self._composition = None
         self._session_id = ""
         self._platform = "cli"
         self._agent_identity = ""
@@ -273,6 +335,17 @@ class LiveBrainProvider(MemoryProvider):
         self._research = ResearchManager(self._store.conn, ingestor=self._ingestor, causal=self._causal, session_id=self._session_id, scope_key=self._scope_key)
         self._epistemic = EpistemicManager(self._store.conn, ingestor=self._ingestor, session_id=self._session_id, scope_key=self._scope_key)
         self._artifacts = ArtifactRegistry(self._store.conn)
+
+        # New managers for enhanced features
+        from .entity_graph import EntityGraph
+        from .dialectic import DialecticEngine
+        from .user_alignment import UserAlignmentTracker
+        from .compositional_query import CompositionEngine
+
+        self._entity_graph = EntityGraph(self._store.conn)
+        self._dialectic = DialecticEngine(self._store.conn)
+        self._user_alignment = UserAlignmentTracker(self._store.conn)
+        self._composition = CompositionEngine(self._store.conn)
 
         self._store.conn.execute(
             "INSERT OR REPLACE INTO sessions (session_id, platform, agent_identity, agent_context, user_id, gateway_session_key, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -433,6 +506,10 @@ class LiveBrainProvider(MemoryProvider):
             ARTIFACT_MARK_SCHEMA,
             ARTIFACT_LIST_SCHEMA,
             SELF_EVOLUTION_SCHEMA,
+            ENTITY_GRAPH_SCHEMA,
+            DIALECTIC_SCHEMA,
+            USER_PROFILE_SCHEMA,
+            COMPOSE_QUERY_SCHEMA,
         ]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
@@ -597,6 +674,62 @@ class LiveBrainProvider(MemoryProvider):
                 )
                 return json.dumps(result)
             return json.dumps(self._research.plan_research(question, args.get("scope", "auto")))
+        if tool_name == "brain_entity_graph":
+            if not self._entity_graph:
+                return tool_error("Entity graph is not initialized")
+            action = args.get("action", "find_related")
+            entity_name = args.get("entity_name", "")
+            if action == "find_related":
+                # Find entity by name
+                entity_row = self._store.conn.execute(
+                    "SELECT entity_id FROM entities WHERE canonical_name = ? LIMIT 1",
+                    (entity_name,)
+                ).fetchone()
+                if not entity_row:
+                    return json.dumps({"error": "Entity not found", "related": []})
+                related = self._entity_graph.get_related_entities(
+                    entity_row[0],
+                    args.get("relationship_type"),
+                    args.get("max_depth", 2)
+                )
+                return json.dumps({"related": related})
+            elif action == "synthesize":
+                entity_row = self._store.conn.execute(
+                    "SELECT entity_id FROM entities WHERE canonical_name = ? LIMIT 1",
+                    (entity_name,)
+                ).fetchone()
+                if not entity_row:
+                    return json.dumps({"error": "Entity not found", "synthesis": ""})
+                synthesis = self._entity_graph.synthesize_entity_context(entity_row[0])
+                return json.dumps({"synthesis": synthesis})
+            return tool_error("Unknown entity_graph action")
+        if tool_name == "brain_synthesize":
+            if not self._dialectic:
+                return tool_error("Dialectic engine is not initialized")
+            result = self._dialectic.synthesize_cross_session(
+                args.get("query", ""),
+                self._scope_key,
+                args.get("max_sessions", 5)
+            )
+            return json.dumps(result, ensure_ascii=False)
+        if tool_name == "brain_user_profile":
+            if not self._user_alignment:
+                return tool_error("User alignment tracker is not initialized")
+            action = args.get("action", "view")
+            if action == "view":
+                context = self._user_alignment.get_user_context(self._user_id, self._scope_key)
+                return json.dumps({"context": context})
+            return json.dumps({"status": "ok"})
+        if tool_name == "brain_compose_query":
+            if not self._composition:
+                return tool_error("Composition engine is not initialized")
+            add_concepts = args.get("add_concepts", [])
+            subtract_concepts = args.get("subtract_concepts", [])
+            if not add_concepts:
+                return tool_error("add_concepts is required")
+            query_vector = self._composition.compose(add_concepts, subtract_concepts)
+            similar = self._composition.find_similar(query_vector, args.get("top_k", 5))
+            return json.dumps({"similar": similar}, ensure_ascii=False)
         return tool_error(f"Unknown tool: {tool_name}")
 
     def shutdown(self) -> None:

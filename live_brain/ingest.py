@@ -576,6 +576,10 @@ class Ingestor:
         for ent in entities:
             self._upsert_entity(ent, turn_id)
 
+        # Extract entity relationships (Feature 2)
+        if len(entities) >= 2:
+            self._extract_entity_relationships(user_text, assistant_text, entities, scope_key, created_at)
+
         scope_tags = extract_scope_tags(user_text, assistant_text, scope_key=scope_key)
         self._apply_user_feedback(scope_key, user_text, created_at)
         self._maybe_propose_self_evolution(scope_key, session_id, user_text, assistant_text, created_at)
@@ -826,7 +830,111 @@ class Ingestor:
                 "scope_key": scope_key,
                 "scope_tags_json": tags_to_json(scope_tags),
             })
+
+        # Automatic fact extraction from assistant responses (Feature 1)
+        if assistant_text:
+            auto_facts = self._auto_extract_facts_from_assistant(
+                assistant_text, created_at, session_id, scope_key, scope_tags
+            )
+            facts.extend(auto_facts)
+
         return facts
+
+    def _auto_extract_facts_from_assistant(
+        self,
+        assistant_text: str,
+        created_at: float,
+        session_id: str,
+        scope_key: str,
+        scope_tags: Dict[str, Any] | None
+    ) -> List[Dict[str, Any]]:
+        """
+        Automatically extract facts from assistant responses (Feature 1).
+
+        Patterns:
+        - "The [subject] is [predicate]"
+        - "[Entity] uses/requires/has [property]"
+        - Factual statements
+        """
+        from .context_fence import should_fence
+
+        facts: List[Dict[str, Any]] = []
+
+        # Pattern 1: "X is Y" - flexible matching for conversational text
+        is_pattern = re.compile(r'\b([A-Z][A-Za-z0-9_-]+(?:\s+[A-Za-z0-9_-]+)*)\s+(?:is|are)\s+((?:a|an|the)?\s*[^.!?\n]+)', re.MULTILINE)
+        for match in is_pattern.finditer(assistant_text):
+            subject, predicate = match.groups()
+            fact_text = f"{subject} is {predicate.strip()}"
+
+            if should_fence(fact_text, 'assistant', 'auto'):
+                continue
+
+            if len(fact_text) > 20 and len(fact_text) < 200:
+                facts.append({
+                    "fact_id": _fact_id('auto_extracted_is', fact_text, scope_key),
+                    "fact_type": "auto_extracted_fact",
+                    "fact_text": _canonical_fact_text(fact_text),
+                    "confidence": 0.7,
+                    "source_kind": "assistant_auto",
+                    "valid_from": created_at,
+                    "valid_to": None,
+                    "status": "active",
+                    "evidence_count": 1,
+                    "session_id": session_id,
+                    "scope_key": scope_key,
+                    "scope_tags_json": tags_to_json(scope_tags),
+                    "extraction_method": "auto",
+                })
+
+        # Pattern 2: "X uses/requires/has Y" - flexible matching
+        relation_pattern = re.compile(r'\b([A-Z][A-Za-z0-9_-]+(?:\s+[A-Za-z0-9_-]+)*)\s+(uses|requires|has|needs|supports|processes|handles)\s+([^.!?,\n]+)', re.IGNORECASE)
+        for match in relation_pattern.finditer(assistant_text):
+            entity, relation, target = match.groups()
+            fact_text = f"{entity} {relation} {target.strip()}"
+
+            if should_fence(fact_text, 'assistant', 'auto'):
+                continue
+
+            if len(fact_text) > 15 and len(fact_text) < 150:
+                facts.append({
+                    "fact_id": _fact_id('auto_extracted_relation', fact_text, scope_key),
+                    "fact_type": "auto_extracted_fact",
+                    "fact_text": _canonical_fact_text(fact_text),
+                    "confidence": 0.7,
+                    "source_kind": "assistant_auto",
+                    "valid_from": created_at,
+                    "valid_to": None,
+                    "status": "active",
+                    "evidence_count": 1,
+                    "session_id": session_id,
+                    "scope_key": scope_key,
+                    "scope_tags_json": tags_to_json(scope_tags),
+                    "extraction_method": "auto",
+                })
+
+        return facts[:5]  # Limit to 5 auto-extracted facts per turn
+
+    def _extract_entity_relationships(self, user_text: str, assistant_text: str, entities: List[Dict], scope_key: str, created_at: float):
+        """Extract relationships between entities (Feature 2)."""
+        from .entity_graph import EntityGraph
+        graph = EntityGraph(self.conn)
+
+        combined_text = f"{user_text} {assistant_text}".lower()
+        entity_names = [e.get('canonical_name', '').lower() for e in entities]
+
+        # Detect "X uses Y" relationships
+        for i, ent_a in enumerate(entities):
+            for j, ent_b in enumerate(entities):
+                if i >= j:
+                    continue
+                name_a = ent_a.get('canonical_name', '').lower()
+                name_b = ent_b.get('canonical_name', '').lower()
+
+                # Check for relationship patterns
+                if f"{name_a} uses {name_b}" in combined_text or f"{name_a} use {name_b}" in combined_text:
+                    graph.add_relationship(ent_a['entity_id'], ent_b['entity_id'], 'uses', strength=0.8, scope_key=scope_key)
+                elif f"{name_a} processes {name_b}" in combined_text or f"{name_a} process {name_b}" in combined_text:
+                    graph.add_relationship(ent_a['entity_id'], ent_b['entity_id'], 'processes', strength=0.8, scope_key=scope_key)
 
     def _extract_beliefs(self, user_text: str, assistant_text: str, created_at: float, session_id: str = '', scope_key: str = '', scope_tags: Dict[str, Any] | None = None) -> List[Dict[str, Any]]:
         beliefs: List[Dict[str, Any]] = []
@@ -894,7 +1002,73 @@ class Ingestor:
                 "scope_key": scope_key,
                 "scope_tags_json": tags_to_json(scope_tags),
             })
+
+        # Automatic belief extraction from assistant responses (Feature 1)
+        if assistant_text:
+            auto_beliefs = self._auto_extract_beliefs_from_assistant(
+                assistant_text, created_at, session_id, scope_key, scope_tags
+            )
+            beliefs.extend(auto_beliefs)
+
         return beliefs
+
+    def _auto_extract_beliefs_from_assistant(
+        self,
+        assistant_text: str,
+        created_at: float,
+        session_id: str,
+        scope_key: str,
+        scope_tags: Dict[str, Any] | None
+    ) -> List[Dict[str, Any]]:
+        """
+        Automatically extract beliefs/hypotheses from assistant responses (Feature 1).
+
+        Patterns:
+        - "This might be caused by X"
+        - "The issue could be X"
+        - "I suspect X"
+        """
+        from .context_fence import should_fence
+
+        beliefs: List[Dict[str, Any]] = []
+
+        # Pattern 1: "might be caused by" / "could be"
+        hypothesis_patterns = [
+            r'(?:might|could|may)\s+be\s+(?:caused\s+by|due\s+to)\s+([^.!?]+)',
+            r'(?:the\s+)?(?:issue|problem|error)\s+(?:might|could|may)\s+be\s+([^.!?]+)',
+            r'I\s+suspect\s+(?:that\s+)?([^.!?]+)',
+            r'(?:possibly|perhaps|maybe)\s+(?:caused\s+by|due\s+to)\s+([^.!?]+)',
+        ]
+
+        for pattern in hypothesis_patterns:
+            for match in re.finditer(pattern, assistant_text, re.IGNORECASE):
+                hypothesis = match.group(1).strip()
+                claim_text = f"Hypothesis: {hypothesis}"
+
+                if should_fence(claim_text, 'assistant', 'auto'):
+                    continue
+
+                if len(hypothesis) > 10 and len(hypothesis) < 200:
+                    beliefs.append({
+                        "belief_id": f"belief:auto_hypothesis:{stable_hash(claim_text)}",
+                        "episode_id": None,
+                        "claim_text": claim_text[:500],
+                        "belief_kind": "hypothesis",
+                        "confidence": 0.5,
+                        "status": "open",
+                        "created_at": created_at,
+                        "updated_at": created_at,
+                        "validated_by": None,
+                        "supersedes_belief_id": None,
+                        "caused_by_work_item_id": None,
+                        "tool_name": None,
+                        "session_id": session_id,
+                        "scope_key": scope_key,
+                        "scope_tags_json": tags_to_json(scope_tags),
+                        "extraction_method": "auto",
+                    })
+
+        return beliefs[:3]  # Limit to 3 auto-extracted beliefs per turn
 
     def _episode_title(self, user_text: str, assistant_text: str) -> str:
         raw = user_text.strip() or assistant_text.strip() or "general thread"
@@ -962,9 +1136,9 @@ class Ingestor:
         fact_id = fact["fact_id"]
         before = row_to_dict(self.conn.execute("SELECT * FROM facts WHERE fact_id=?", (fact_id,)).fetchone())
         self.conn.execute(
-            "INSERT OR REPLACE INTO facts (fact_id, subject_entity_id, fact_type, fact_text, confidence, source_kind, valid_from, valid_to, status, evidence_count, session_id, scope_key, scope_tags_json, evidence_packet_id, source_turn_id, source_event_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO facts (fact_id, subject_entity_id, fact_type, fact_text, confidence, source_kind, valid_from, valid_to, status, evidence_count, session_id, scope_key, scope_tags_json, evidence_packet_id, source_turn_id, source_event_id, extraction_method) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                fact_id, fact.get("subject_entity_id"), fact["fact_type"], fact["fact_text"], fact["confidence"], fact["source_kind"], fact["valid_from"], fact["valid_to"], fact["status"], fact["evidence_count"], fact.get("session_id", ""), fact.get("scope_key", ""), fact.get("scope_tags_json", "{}"), fact.get("evidence_packet_id", ""), fact.get("source_turn_id", ""), fact.get("source_event_id", ""),
+                fact_id, fact.get("subject_entity_id"), fact["fact_type"], fact["fact_text"], fact["confidence"], fact["source_kind"], fact["valid_from"], fact["valid_to"], fact["status"], fact["evidence_count"], fact.get("session_id", ""), fact.get("scope_key", ""), fact.get("scope_tags_json", "{}"), fact.get("evidence_packet_id", ""), fact.get("source_turn_id", ""), fact.get("source_event_id", ""), fact.get("extraction_method", "manual"),
             ),
         )
         after = row_to_dict(self.conn.execute("SELECT * FROM facts WHERE fact_id=?", (fact_id,)).fetchone())
@@ -974,9 +1148,9 @@ class Ingestor:
         belief_id = belief["belief_id"]
         before = row_to_dict(self.conn.execute("SELECT * FROM beliefs WHERE belief_id=?", (belief_id,)).fetchone())
         self.conn.execute(
-            "INSERT OR REPLACE INTO beliefs (belief_id, episode_id, claim_text, belief_kind, confidence, status, created_at, updated_at, validated_by, supersedes_belief_id, caused_by_work_item_id, tool_name, session_id, scope_key, scope_tags_json, evidence_packet_id, source_turn_id, source_event_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO beliefs (belief_id, episode_id, claim_text, belief_kind, confidence, status, created_at, updated_at, validated_by, supersedes_belief_id, caused_by_work_item_id, tool_name, session_id, scope_key, scope_tags_json, evidence_packet_id, source_turn_id, source_event_id, extraction_method) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                belief_id, belief.get("episode_id"), belief["claim_text"], belief["belief_kind"], belief["confidence"], belief["status"], belief["created_at"], belief["updated_at"], belief.get("validated_by"), belief.get("supersedes_belief_id"), belief.get("caused_by_work_item_id"), belief.get("tool_name"), belief.get("session_id", ""), belief.get("scope_key", ""), belief.get("scope_tags_json", "{}"), belief.get("evidence_packet_id", ""), belief.get("source_turn_id", ""), belief.get("source_event_id", ""),
+                belief_id, belief.get("episode_id"), belief["claim_text"], belief["belief_kind"], belief["confidence"], belief["status"], belief["created_at"], belief["updated_at"], belief.get("validated_by"), belief.get("supersedes_belief_id"), belief.get("caused_by_work_item_id"), belief.get("tool_name"), belief.get("session_id", ""), belief.get("scope_key", ""), belief.get("scope_tags_json", "{}"), belief.get("evidence_packet_id", ""), belief.get("source_turn_id", ""), belief.get("source_event_id", ""), belief.get("extraction_method", "manual"),
             ),
         )
         after = row_to_dict(self.conn.execute("SELECT * FROM beliefs WHERE belief_id=?", (belief_id,)).fetchone())
