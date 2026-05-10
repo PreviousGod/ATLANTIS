@@ -964,10 +964,10 @@ class Ingestor:
 
         combined_text = f"{user_text} {assistant_text}".lower()
 
-        # More flexible relationship patterns
+        # Check all entity pairs (both directions)
         for i, ent_a in enumerate(entities):
             for j, ent_b in enumerate(entities):
-                if i >= j:
+                if i == j:
                     continue
                 name_a = ent_a.get('canonical_name', '').lower()
                 name_b = ent_b.get('canonical_name', '').lower()
@@ -975,13 +975,13 @@ class Ingestor:
                 if not name_a or not name_b or len(name_a) < 2 or len(name_b) < 2:
                     continue
 
-                # Pattern: "use X to/for Y" or "X for Y"
+                # Pattern: "use X to/for Y"
                 if re.search(rf'\b(use|using|used)\s+{re.escape(name_a)}\s+(to|for)\s+\w*\s*{re.escape(name_b)}', combined_text):
                     graph.add_relationship(ent_a['entity_id'], ent_b['entity_id'], 'processes', strength=0.7, scope_key=scope_key)
                 # Pattern: "X process/processes Y"
                 elif re.search(rf'\b{re.escape(name_a)}\s+(process|processes|processing)\s+\w*\s*{re.escape(name_b)}', combined_text):
                     graph.add_relationship(ent_a['entity_id'], ent_b['entity_id'], 'processes', strength=0.8, scope_key=scope_key)
-                # Pattern: both entities close together (within 10 words)
+                # Pattern: proximity (both entities within 50 chars)
                 elif re.search(rf'\b{re.escape(name_a)}\b.{{0,50}}\b{re.escape(name_b)}\b', combined_text):
                     graph.add_relationship(ent_a['entity_id'], ent_b['entity_id'], 'related_to', strength=0.5, scope_key=scope_key)
 
