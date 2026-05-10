@@ -498,23 +498,27 @@ class Ingestor:
                 created_at=created_at,
             )
             if success:
-                action_fact = self._tool_action_fact_text(user_text, tool_name, args_template, payload, result_text, artifact_path)
-                if action_fact:
-                    self._upsert_fact({
-                        "fact_id": _fact_id('tool_action_memory', action_fact, scope_key),
-                        "subject_entity_id": None,
-                        "fact_type": "tool_action_memory",
-                        "fact_text": _canonical_fact_text(action_fact),
-                        "confidence": 0.86,
-                        "source_kind": "post_tool_call_action",
-                        "valid_from": created_at,
-                        "valid_to": None,
-                        "status": "active",
-                        "evidence_count": 1,
-                        "session_id": session_id,
-                        "scope_key": scope_key,
-                        "scope_tags_json": tags_to_json(extract_scope_tags(user_text, result_text, scope_key=scope_key)),
-                    })
+                # Filter: only store facts for tools that produce meaningful outcomes
+                # Skip routine navigation/reading tools to prevent memory pollution
+                SKIP_TOOL_LOGS = {'read_file', 'search_files', 'skill_view', 'skill_manage', 'skill_list', 'glob', 'grep', 'telegram', 'browser_navigate', 'browser_scroll', 'browser_snapshot', 'browser_click'}
+                if tool_name not in SKIP_TOOL_LOGS:
+                    action_fact = self._tool_action_fact_text(user_text, tool_name, args_template, payload, result_text, artifact_path)
+                    if action_fact:
+                        self._upsert_fact({
+                            "fact_id": _fact_id('tool_action_memory', action_fact, scope_key),
+                            "subject_entity_id": None,
+                            "fact_type": "tool_action_memory",
+                            "fact_text": _canonical_fact_text(action_fact),
+                            "confidence": 0.86,
+                            "source_kind": "post_tool_call_action",
+                            "valid_from": created_at,
+                            "valid_to": None,
+                            "status": "active",
+                            "evidence_count": 1,
+                            "session_id": session_id,
+                            "scope_key": scope_key,
+                            "scope_tags_json": tags_to_json(extract_scope_tags(user_text, result_text, scope_key=scope_key)),
+                        })
         self.conn.commit()
         return {
             'result_id': result_id,
@@ -595,6 +599,37 @@ class Ingestor:
             if turn_id is not None:
                 belief["source_turn_id"] = str(turn_id)
             self._upsert_belief(belief)
+
+        # Feature 5: User alignment tracking
+        try:
+            from .user_alignment import UserAlignmentTracker
+            alignment = UserAlignmentTracker(self.conn)
+            user_id = scope_key.split(':')[-1] if ':' in scope_key else 'default'
+            alignment.extract_preferences(user_text, user_id, turn_id or 0, scope_key)
+        except Exception as e:
+            logger.debug(f"[live_brain] user alignment failed: {e}")
+
+        # Feature 3: Dialectic reasoning (cross-session synthesis)
+        try:
+            from .dialectic import DialecticEngine
+            dialectic = DialecticEngine(self.conn)
+            # Synthesize on every turn with meaningful user text
+            if user_text and len(user_text.strip()) > 10:
+                dialectic.synthesize_cross_session(user_text, scope_key, max_sessions=5)
+        except Exception:
+            pass  # Fail silently
+
+        # Feature 6: Compositional queries (concept vectors)
+        try:
+            from .compositional_query import CompositionEngine
+            comp = CompositionEngine(self.conn)
+            # Create vectors for entities
+            for entity in entities[:5]:  # Limit to 5 to avoid overhead
+                concept_name = entity.get('canonical_name', '')
+                if concept_name and len(concept_name) > 2:
+                    comp.get_or_create_vector(concept_name)
+        except Exception as e:
+            logger.debug(f"[live_brain] compositional query failed: {e}")
 
         episode_title = self._episode_title(user_text, assistant_text)
         episode_summary = self._episode_summary(episode_title, user_text, assistant_text, entities)
@@ -838,6 +873,13 @@ class Ingestor:
             )
             facts.extend(auto_facts)
 
+        # Also extract from user messages when they state facts
+        if user_text:
+            auto_facts_user = self._auto_extract_facts_from_assistant(
+                user_text, created_at, session_id, scope_key, scope_tags
+            )
+            facts.extend(auto_facts_user)
+
         return facts
 
     def _auto_extract_facts_from_assistant(
@@ -916,13 +958,13 @@ class Ingestor:
 
     def _extract_entity_relationships(self, user_text: str, assistant_text: str, entities: List[Dict], scope_key: str, created_at: float):
         """Extract relationships between entities (Feature 2)."""
+        import re
         from .entity_graph import EntityGraph
         graph = EntityGraph(self.conn)
 
         combined_text = f"{user_text} {assistant_text}".lower()
-        entity_names = [e.get('canonical_name', '').lower() for e in entities]
 
-        # Detect "X uses Y" relationships
+        # More flexible relationship patterns
         for i, ent_a in enumerate(entities):
             for j, ent_b in enumerate(entities):
                 if i >= j:
@@ -930,11 +972,18 @@ class Ingestor:
                 name_a = ent_a.get('canonical_name', '').lower()
                 name_b = ent_b.get('canonical_name', '').lower()
 
-                # Check for relationship patterns
-                if f"{name_a} uses {name_b}" in combined_text or f"{name_a} use {name_b}" in combined_text:
-                    graph.add_relationship(ent_a['entity_id'], ent_b['entity_id'], 'uses', strength=0.8, scope_key=scope_key)
-                elif f"{name_a} processes {name_b}" in combined_text or f"{name_a} process {name_b}" in combined_text:
+                if not name_a or not name_b or len(name_a) < 2 or len(name_b) < 2:
+                    continue
+
+                # Pattern: "use X to/for Y" or "X for Y"
+                if re.search(rf'\b(use|using|used)\s+{re.escape(name_a)}\s+(to|for)\s+\w*\s*{re.escape(name_b)}', combined_text):
+                    graph.add_relationship(ent_a['entity_id'], ent_b['entity_id'], 'processes', strength=0.7, scope_key=scope_key)
+                # Pattern: "X process/processes Y"
+                elif re.search(rf'\b{re.escape(name_a)}\s+(process|processes|processing)\s+\w*\s*{re.escape(name_b)}', combined_text):
                     graph.add_relationship(ent_a['entity_id'], ent_b['entity_id'], 'processes', strength=0.8, scope_key=scope_key)
+                # Pattern: both entities close together (within 10 words)
+                elif re.search(rf'\b{re.escape(name_a)}\b.{{0,50}}\b{re.escape(name_b)}\b', combined_text):
+                    graph.add_relationship(ent_a['entity_id'], ent_b['entity_id'], 'related_to', strength=0.5, scope_key=scope_key)
 
     def _extract_beliefs(self, user_text: str, assistant_text: str, created_at: float, session_id: str = '', scope_key: str = '', scope_tags: Dict[str, Any] | None = None) -> List[Dict[str, Any]]:
         beliefs: List[Dict[str, Any]] = []
@@ -983,25 +1032,28 @@ class Ingestor:
                 "scope_key": scope_key,
                 "scope_tags_json": tags_to_json(scope_tags),
             })
-        # Track failed attempts
+        # Track failed attempts - extract concise failure info, not full response
         if assistant_text and any(term in assistant_text.lower() for term in ['failed', 'error', 'cannot', 'ne mogu', 'nije uspjelo']):
-            beliefs.append({
-                "belief_id": f"belief:failed_attempt:{stable_hash(assistant_text)}",
-                "episode_id": None,
-                "claim_text": assistant_text[:500],
-                "belief_kind": "failed_attempt",
-                "confidence": 0.5,
-                "status": "open",
-                "created_at": created_at,
-                "updated_at": created_at,
-                "validated_by": None,
-                "supersedes_belief_id": None,
-                "caused_by_work_item_id": None,
-                "tool_name": None,
-                "session_id": session_id,
-                "scope_key": scope_key,
-                "scope_tags_json": tags_to_json(scope_tags),
-            })
+            # Extract first sentence with failure context instead of full response
+            failure_claim = _first_useful_sentence(assistant_text, max_len=200)
+            if failure_claim and len(failure_claim) > 15:  # Only store if meaningful
+                beliefs.append({
+                    "belief_id": f"belief:failed_attempt:{stable_hash(failure_claim)}",
+                    "episode_id": None,
+                    "claim_text": failure_claim,
+                    "belief_kind": "failed_attempt",
+                    "confidence": 0.5,
+                    "status": "open",
+                    "created_at": created_at,
+                    "updated_at": created_at,
+                    "validated_by": None,
+                    "supersedes_belief_id": None,
+                    "caused_by_work_item_id": None,
+                    "tool_name": None,
+                    "session_id": session_id,
+                    "scope_key": scope_key,
+                    "scope_tags_json": tags_to_json(scope_tags),
+                })
 
         # Automatic belief extraction from assistant responses (Feature 1)
         if assistant_text:

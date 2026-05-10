@@ -37,8 +37,8 @@ class UserAlignmentTracker:
         preferences = []
         now = time.time()
 
-        # Pattern 1: "I prefer X"
-        prefer_match = re.search(r'I\s+prefer\s+([^.!?]+)', user_text, re.IGNORECASE)
+        # Pattern 1: "I prefer X" / "Ja preferiram X"
+        prefer_match = re.search(r'(?:I|Ja)\s+(?:prefer|preferiram)\s+([^.!?]+)', user_text, re.IGNORECASE)
         if prefer_match:
             preference_value = prefer_match.group(1).strip()
             preferences.append({
