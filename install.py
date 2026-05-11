@@ -6,6 +6,7 @@ Usage: python install.py
 """
 import os
 import platform
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -164,7 +165,7 @@ def configure_hermes(hh: Path, auto: bool) -> None:
     content = config_path.read_text(encoding="utf-8")
     needs_memory = "engine: live_brain" not in content
     needs_ctx = "engine: live_brain_ctx" not in content
-    needs_plugin_lb = "- live_brain" not in content
+    needs_plugin_lb = not re.search(r'-\s+live_brain\s*$', content, re.MULTILINE)
     needs_plugin_ctx = "- live_brain_ctx" not in content
 
     if not any([needs_memory, needs_ctx, needs_plugin_lb, needs_plugin_ctx]):
@@ -202,14 +203,13 @@ def configure_hermes(hh: Path, auto: bool) -> None:
             patches.append("\ncontext:\n  engine: live_brain_ctx\n")
     if needs_plugin_lb or needs_plugin_ctx:
         if "plugins:" not in content:
-            patches.append("\nplugins:\n  - live_brain\n  - live_brain_ctx\n")
+            patches.append("\nplugins:\n  enabled:\n  - live_brain\n  - live_brain_ctx\n")
         else:
             if needs_plugin_lb:
-                content = content.replace("plugins:", "plugins:\n  - live_brain", 1)
+                content = content.replace("- live_brain_ctx", "- live_brain\n  - live_brain_ctx", 1)
             if needs_plugin_ctx:
-                # Re-read in case we just modified
                 if "- live_brain_ctx" not in content:
-                    content = content.replace("plugins:", "plugins:\n  - live_brain_ctx", 1)
+                    content = content.replace("- live_brain", "- live_brain\n  - live_brain_ctx", 1)
 
     content += "".join(patches)
     config_path.write_text(content, encoding="utf-8")
