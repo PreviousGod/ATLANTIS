@@ -53,12 +53,12 @@ You MUST use brain_epistemic(action=search_web) or explicitly state "I don't hav
 # ---------------------------------------------------------------------------
 
 _COMPLEX_SIGNALS = re.compile(
-    r'\b(zašto|why|kako|how|debug|fix|error|ne radi|doesn.t work|fails?|broke|implement|architect|design|compare|analyze|explain why|root cause|difference between)\b',
+    r'\b(zašto|why|kako|how|debug|fix|error|ne radi|doesn.t work|fails?|broke|implement|architect|design|compare|analyze|explain why|root cause|difference between|почему|як|чому|как|не работает|не працює|ошибка|помилка)\b',
     re.IGNORECASE,
 )
 
 _TRIVIAL_SIGNALS = re.compile(
-    r'^(da|ne|ok|hvala|thanks|yes|no|got it|važi|aha|razumem|nastavi|continue|skip|next)\s*[.!?]?$',
+    r'^(da|ne|ok|hvala|thanks|yes|no|got it|važi|aha|razumem|nastavi|continue|skip|next|да|нет|ні|так|добре|дякую|спасибо|продолжай|далі)\s*[.!?]?$',
     re.IGNORECASE,
 )
 
