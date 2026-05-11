@@ -512,33 +512,35 @@ def _record_tool_result(tool_name: str, args: Any, result: Any, session_id: str 
         except Exception:
             success = not bool(re.search(r'\b(traceback|exception|error executing|failed|permission denied|connection refused|modulenotfounderror)\b', result_text or '', re.IGNORECASE))
         RealityEngine = _load_reality_engine_class()
-        RealityEngine(conn).ingest_event(
-            scope_key=scope_key,
-            event_type='tool_result',
-            subject=tool_name,
-            payload={
-                'tool_name': tool_name,
-                'args': args if isinstance(args, dict) else {},
-                'result': result_text[:4000],
-                'success': success,
-                'tool_call_id': tool_call_id,
-                'duration_ms': duration_ms,
-                'user_message': user_text,
-            },
-            session_id=session_id,
-            source='post_tool_call',
-            confidence=0.82 if success else 0.9,
-            created_at=created_at,
-        )
+        if RealityEngine is not None:
+            RealityEngine(conn).ingest_event(
+                scope_key=scope_key,
+                event_type='tool_result',
+                subject=tool_name,
+                payload={
+                    'tool_name': tool_name,
+                    'args': args if isinstance(args, dict) else {},
+                    'result': result_text[:4000],
+                    'success': success,
+                    'tool_call_id': tool_call_id,
+                    'duration_ms': duration_ms,
+                    'user_message': user_text,
+                },
+                session_id=session_id,
+                source='post_tool_call',
+                confidence=0.82 if success else 0.9,
+                created_at=created_at,
+            )
         if tool_name in {'web_search', 'web_extract'} and success:
             EpistemicManager = _load_epistemic_manager_class()
-            EpistemicManager(conn, session_id=session_id, scope_key=scope_key).record_tool_result(
-                scope_key=scope_key,
-                tool_name=tool_name,
-                args=args if isinstance(args, dict) else {},
-                result=result_text,
-                session_id=session_id,
-            )
+            if EpistemicManager is not None:
+                EpistemicManager(conn, session_id=session_id, scope_key=scope_key).record_tool_result(
+                    scope_key=scope_key,
+                    tool_name=tool_name,
+                    args=args if isinstance(args, dict) else {},
+                    result=result_text,
+                    session_id=session_id,
+                )
         # --- Anti-downgrade: record failed approaches ---
         if not success and session_id:
             key_args = ', '.join(f'{k}={v}' for k, v in (args if isinstance(args, dict) else {}).items() if k in ('query', 'path', 'pattern', 'url', 'command'))[:100]
@@ -575,6 +577,8 @@ def _pre_tool_call(**kwargs):
         if _tool_call_is_local_debug(tool_name, args, user_text):
             return None
         EpistemicManager = _load_epistemic_manager_class()
+        if EpistemicManager is None:
+            return None
         classification = EpistemicManager(conn, session_id=session_id, scope_key=scope_key or 'global').classify(user_text)
         if classification.should_research:
             return {

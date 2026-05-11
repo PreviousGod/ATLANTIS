@@ -60,27 +60,35 @@ def _load_reality_engine_class():
         return RealityEngine
     except Exception:
         pass
-    import importlib.util as _importlib_util
-    import sys as _sys
-    import types as _types
-    package_name = '_live_brain_ctx_reality_pkg'
-    live_brain_dir = Path(__file__).resolve().parent.parent.parent / 'live_brain'
-    if package_name not in _sys.modules:
-        package = _types.ModuleType(package_name)
-        package.__path__ = [str(live_brain_dir)]
-        _sys.modules[package_name] = package
-    for module_name in ['utils', 'reality']:
-        full_name = f'{package_name}.{module_name}'
-        if full_name in _sys.modules:
-            continue
-        spec = _importlib_util.spec_from_file_location(full_name, live_brain_dir / f'{module_name}.py')
-        if spec is None or spec.loader is None:
-            raise ImportError(f'Cannot load {module_name} from {live_brain_dir}')
-        module = _importlib_util.module_from_spec(spec)
-        module.__package__ = package_name
-        _sys.modules[full_name] = module
-        spec.loader.exec_module(module)
-    return _sys.modules[f'{package_name}.reality'].RealityEngine
+    try:
+        import importlib.util as _importlib_util
+        import sys as _sys
+        import types as _types
+        package_name = '_live_brain_ctx_reality_pkg'
+        live_brain_dir = Path(__file__).resolve().parent.parent.parent / 'live_brain'
+        if not live_brain_dir.exists():
+            # Try sibling in plugins dir
+            live_brain_dir = Path(__file__).resolve().parent.parent.parent.parent / 'live_brain'
+        if not live_brain_dir.exists():
+            return None
+        if package_name not in _sys.modules:
+            package = _types.ModuleType(package_name)
+            package.__path__ = [str(live_brain_dir)]
+            _sys.modules[package_name] = package
+        for module_name in ['utils', 'reality']:
+            full_name = f'{package_name}.{module_name}'
+            if full_name in _sys.modules:
+                continue
+            spec = _importlib_util.spec_from_file_location(full_name, live_brain_dir / f'{module_name}.py')
+            if spec is None or spec.loader is None:
+                return None
+            module = _importlib_util.module_from_spec(spec)
+            module.__package__ = package_name
+            _sys.modules[full_name] = module
+            spec.loader.exec_module(module)
+        return _sys.modules[f'{package_name}.reality'].RealityEngine
+    except Exception:
+        return None
 
 
 def _record_reality_event(scope_key: str, event_type: str, subject: str, payload: Dict[str, Any], *, session_id: str = '', source: str = 'live_brain_ctx', confidence: float = 0.75, created_at: float | None = None) -> dict:
@@ -93,6 +101,8 @@ def _record_reality_event(scope_key: str, event_type: str, subject: str, payload
         conn.row_factory = sqlite3.Row
         _configure_ctx_sqlite(conn)
         RealityEngine = _load_reality_engine_class()
+        if RealityEngine is None:
+            return {}
         return RealityEngine(conn).ingest_event(
             scope_key=scope_key or session_id or 'global',
             event_type=event_type,
@@ -137,27 +147,34 @@ def _load_epistemic_manager_class():
         return EpistemicManager
     except Exception:
         pass
-    import importlib.util as _importlib_util
-    import sys as _sys
-    package_name = '_live_brain_ctx_epistemic_pkg'
-    live_brain_dir = Path(__file__).resolve().parent.parent.parent / 'live_brain'
-    if package_name not in _sys.modules:
-        import types as _types
-        package = _types.ModuleType(package_name)
-        package.__path__ = [str(live_brain_dir)]
-        _sys.modules[package_name] = package
-    for module_name in ['utils', 'epistemic']:
-        full_name = f'{package_name}.{module_name}'
-        if full_name in _sys.modules:
-            continue
-        spec = _importlib_util.spec_from_file_location(full_name, live_brain_dir / f'{module_name}.py')
-        if spec is None or spec.loader is None:
-            raise ImportError(f'Cannot load {module_name} from {live_brain_dir}')
-        module = _importlib_util.module_from_spec(spec)
-        module.__package__ = package_name
-        _sys.modules[full_name] = module
-        spec.loader.exec_module(module)
-    return _sys.modules[f'{package_name}.epistemic'].EpistemicManager
+    try:
+        import importlib.util as _importlib_util
+        import sys as _sys
+        package_name = '_live_brain_ctx_epistemic_pkg'
+        live_brain_dir = Path(__file__).resolve().parent.parent.parent / 'live_brain'
+        if not live_brain_dir.exists():
+            live_brain_dir = Path(__file__).resolve().parent.parent.parent.parent / 'live_brain'
+        if not live_brain_dir.exists():
+            return None
+        if package_name not in _sys.modules:
+            import types as _types
+            package = _types.ModuleType(package_name)
+            package.__path__ = [str(live_brain_dir)]
+            _sys.modules[package_name] = package
+        for module_name in ['utils', 'epistemic']:
+            full_name = f'{package_name}.{module_name}'
+            if full_name in _sys.modules:
+                continue
+            spec = _importlib_util.spec_from_file_location(full_name, live_brain_dir / f'{module_name}.py')
+            if spec is None or spec.loader is None:
+                return None
+            module = _importlib_util.module_from_spec(spec)
+            module.__package__ = package_name
+            _sys.modules[full_name] = module
+            spec.loader.exec_module(module)
+        return _sys.modules[f'{package_name}.epistemic'].EpistemicManager
+    except Exception:
+        return None
 
 
 def _load_epistemic_brief(scope_key: str, user_message: str, session_id: str = '') -> str:
