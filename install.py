@@ -91,6 +91,89 @@ def verify_import(plugins_dir: Path) -> bool:
         sys.path.pop(0)
 
 
+CONFIG_REQUIRED = {
+    "memory_engine": "live_brain",
+    "context_engine": "live_brain_ctx",
+    "plugins": ["live_brain", "live_brain_ctx"],
+}
+
+CONFIG_SNIPPET = """\
+# --- ATLANTIS configuration (add to your config.yaml) ---
+memory:
+  engine: live_brain
+
+context:
+  engine: live_brain_ctx
+
+plugins:
+  - live_brain
+  - live_brain_ctx
+"""
+
+
+def configure_hermes(hh: Path, auto: bool) -> None:
+    """Check and optionally patch config.yaml."""
+    config_path = hh / "config.yaml"
+    if not config_path.exists():
+        print(f"  ⚠ config.yaml not found at {config_path}")
+        print(f"    Create it manually with:\n{CONFIG_SNIPPET}")
+        return
+
+    content = config_path.read_text(encoding="utf-8")
+    needs_memory = "engine: live_brain" not in content
+    needs_ctx = "engine: live_brain_ctx" not in content
+    needs_plugin_lb = "- live_brain" not in content
+    needs_plugin_ctx = "- live_brain_ctx" not in content
+
+    if not any([needs_memory, needs_ctx, needs_plugin_lb, needs_plugin_ctx]):
+        print("  ✓ config.yaml already configured for ATLANTIS")
+        return
+
+    missing = []
+    if needs_memory:
+        missing.append("memory.engine: live_brain")
+    if needs_ctx:
+        missing.append("context.engine: live_brain_ctx")
+    if needs_plugin_lb:
+        missing.append("plugins: - live_brain")
+    if needs_plugin_ctx:
+        missing.append("plugins: - live_brain_ctx")
+
+    if not auto:
+        print(f"  ⚠ config.yaml missing: {', '.join(missing)}")
+        print(f"    Add the following to {config_path}:\n")
+        print(CONFIG_SNIPPET)
+        return
+
+    # Auto-patch: append missing entries
+    patches = []
+    if needs_memory:
+        if "memory:" in content:
+            content = content.replace("memory:", "memory:\n  engine: live_brain", 1)
+        else:
+            patches.append("\nmemory:\n  engine: live_brain\n")
+    if needs_ctx:
+        if "context:" in content:
+            # Insert engine line after context:
+            content = content.replace("context:", "context:\n  engine: live_brain_ctx", 1)
+        else:
+            patches.append("\ncontext:\n  engine: live_brain_ctx\n")
+    if needs_plugin_lb or needs_plugin_ctx:
+        if "plugins:" not in content:
+            patches.append("\nplugins:\n  - live_brain\n  - live_brain_ctx\n")
+        else:
+            if needs_plugin_lb:
+                content = content.replace("plugins:", "plugins:\n  - live_brain", 1)
+            if needs_plugin_ctx:
+                # Re-read in case we just modified
+                if "- live_brain_ctx" not in content:
+                    content = content.replace("plugins:", "plugins:\n  - live_brain_ctx", 1)
+
+    content += "".join(patches)
+    config_path.write_text(content, encoding="utf-8")
+    print(f"  ✓ config.yaml patched: {', '.join(missing)}")
+
+
 def main():
     print("╔══════════════════════════════════════════╗")
     print("║   ATLANTIS Installer for Hermes         ║")
@@ -98,10 +181,13 @@ def main():
     print("╚══════════════════════════════════════════╝")
     print()
 
+    # Parse --auto flag
+    auto_config = "--auto" in sys.argv
+
     root = find_atlantis_root()
     hh = hermes_home()
 
-    print(f"[1/5] Detecting Hermes at: {hh}")
+    print(f"[1/6] Detecting Hermes at: {hh}")
     if not check_hermes(hh):
         sys.exit(1)
     print(f"  ✓ Hermes found")
@@ -109,11 +195,11 @@ def main():
 
     plugins_dir = hh / "plugins"
 
-    print("[2/5] Backing up existing plugins...")
+    print("[2/6] Backing up existing plugins...")
     backup(plugins_dir)
     print()
 
-    print("[3/5] Installing live_brain...")
+    print("[3/6] Installing live_brain...")
     lb_src = root / "live_brain"
     if not lb_src.exists():
         print(f"  ✗ Source not found: {lb_src}")
@@ -121,7 +207,7 @@ def main():
     install_plugin(lb_src, plugins_dir / "live_brain", "live_brain")
     print()
 
-    print("[4/5] Installing live_brain_ctx...")
+    print("[4/6] Installing live_brain_ctx...")
     ctx_src = root / "live_brain_ctx"
     if not ctx_src.exists():
         print(f"  ✗ Source not found: {ctx_src}")
@@ -129,17 +215,28 @@ def main():
     install_plugin(ctx_src, plugins_dir / "live_brain_ctx", "live_brain_ctx")
     print()
 
-    print("[5/5] Verifying installation...")
+    print("[5/6] Configuring Hermes...")
+    if not auto_config:
+        print("  Mode: manual (use --auto to auto-patch config.yaml)")
+    else:
+        print("  Mode: auto-patch")
+    configure_hermes(hh, auto=auto_config)
+    print()
+
+    print("[6/6] Verifying installation...")
     verify_import(plugins_dir)
     print()
 
     print("═" * 44)
     print("✓ ATLANTIS installed successfully!")
     print()
+    print("Usage:")
+    print("  python install.py        → install + show config instructions")
+    print("  python install.py --auto → install + auto-patch config.yaml")
+    print()
     print("Next steps:")
     print("  1. Restart Hermes gateway")
     print("  2. Send a complex query to test cognitive architecture")
-    print("  3. Check logs: tail -f ~/.hermes/logs/gateway.log")
     print()
     print(f"Installed to: {plugins_dir}")
 
