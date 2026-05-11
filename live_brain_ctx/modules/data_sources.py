@@ -48,6 +48,8 @@ logger = logging.getLogger(__name__)
 def _fetch_all_data_sources(conn, qctx, user_message, approval_query,
                             *, ArtifactRegistry=None, DataSources=None):
     """Execute all database queries and return structured results."""
+    if DataSources is None:
+        from .. import DataSources
     # Binding constraints
     binding_rules = conn.execute(
         "SELECT action_json, scope_tags_json, updated_at, specificity FROM rules WHERE scope IN ('user_binding','user_correction') AND category IN ('binding_constraint','learned_fact') AND status='active' AND updated_at > ? ORDER BY specificity DESC, confidence DESC, times_confirmed DESC LIMIT 20",
