@@ -485,6 +485,9 @@ def _record_tool_result(tool_name: str, args: Any, result: Any, session_id: str 
             duration_ms = 0
         scope_key, user_text = _latest_tool_context(conn, session_id, created_at)
         if not scope_key:
+            # No sender_id available in tool-call context (only session_id),
+            # so platform is irrelevant here — _extract_scope_key falls back
+            # to session_id when sender is empty regardless of platform.
             scope_key = _extract_scope_key(user_text, '', session_id)
         Ingestor = _load_live_brain_ingestor_class()
         Ingestor(conn).store_tool_result_event(
