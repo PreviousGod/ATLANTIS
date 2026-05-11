@@ -99,6 +99,7 @@ from .query_classification import (
     _is_diagnostic_query,
     _is_approval_query,
 )
+from .cognitive_architecture import get_cognitive_context, record_ruled_out, ensure_ruled_out_table
 
 logger = logging.getLogger(__name__)
 
@@ -538,6 +539,12 @@ def _record_tool_result(tool_name: str, args: Any, result: Any, session_id: str 
                 result=result_text,
                 session_id=session_id,
             )
+        # --- Anti-downgrade: record failed approaches ---
+        if not success and session_id:
+            key_args = ', '.join(f'{k}={v}' for k, v in (args if isinstance(args, dict) else {}).items() if k in ('query', 'path', 'pattern', 'url', 'command'))[:100]
+            approach = f"{tool_name}({key_args})" if key_args else tool_name
+            error_snippet = (result_text or '')[:150].replace('\n', ' ')
+            record_ruled_out(session_id, approach, error_snippet, db_conn=conn)
     except Exception:
         try:
             if conn:
@@ -712,6 +719,23 @@ def _pre_llm_call(**kwargs):
         if user_message and not _is_chit_chat(user_message):
             _record_context_impression(scope_key, session_id, user_message, '', [], allow_empty=True)
         return None
+
+    # --- Cognitive Architecture injection ---
+    try:
+        fact_count = context.count('\n') if 'KNOWN FACTS' in context else 0
+        query_words = [w for w in re.findall(r'[\w./-]+', (user_message or '').lower()) if len(w) > 3]
+        conn = _get_connection() if Path(_db_path()).exists() else None
+        cognitive_ctx = get_cognitive_context(
+            user_message, session_id, fact_count,
+            scope_key=scope_key, query_words=query_words, db_conn=conn,
+        )
+        if conn:
+            conn.close()
+        if cognitive_ctx:
+            context = cognitive_ctx + "\n\n" + context
+    except Exception:
+        pass
+
     _record_context_impression(scope_key, session_id, user_message, context, list(_LAST_CONTEXT_METADATA.get('recipe_ids') or []))
     return {"context": context}
 
