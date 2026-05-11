@@ -23,6 +23,7 @@ ATLANTIS is a complete operational state management system that gives AI agents 
 
 | Layer | What it does |
 |---|---|
+| **Cognitive Architecture** | Tiered reasoning (decompose → verify → synthesize → adversarial attack → final). Anti-downgrade with constraint propagation. Cross-domain synthesis. |
 | **Reality Engine** | Maintains current operational state: objectives, open loops, blockers, danger zones, action constraints |
 | **Epistemic Autonomy** | Current/high-stakes questions require fresh authoritative sources; blocks stale session_search |
 | **Causal Reasoning** | Beliefs have lifecycle (hypothesis → validated/falsified/ruled_out); cascading invalidation |
@@ -65,12 +66,13 @@ live_brain/
 └── requirements.txt      (ddgs, tiktoken)
 ```
 
-### `live_brain_ctx/` — Context Engine (17 files, ~3000 LOC)
+### `live_brain_ctx/` — Context Engine (18 files, ~3200 LOC)
 
 ```
 live_brain_ctx/
 ├── __init__.py           (235 lines — thin facade + register)
 ├── modules/
+│   ├── cognitive_architecture.py (tiered reasoning + ruled_out + cross-domain)
 │   ├── state.py          (constants + regex patterns)
 │   ├── hooks.py          (4 hook functions + orchestration)
 │   ├── scoring.py        (overlap/domain/marker scoring)
@@ -109,19 +111,20 @@ live_brain_ctx/
 
 ## Installation
 
-See [INSTALL.md](INSTALL.md) for setup instructions.
-
-Quick start:
 ```bash
-# Copy plugins into Hermes
-cp -r live_brain live_brain_ctx ~/.hermes/plugins/
-
-# Install dependencies
-~/.hermes/hermes-agent/venv/bin/pip install -r live_brain/requirements.txt
-
-# Verify
-bash scripts/plugins_preflight.sh
+git clone https://github.com/PreviousGod/ATLANTIS.git
+cd ATLANTIS
+python install.py
 ```
+
+The installer will:
+1. Detect your Hermes installation (Linux/macOS/Windows)
+2. Backup existing plugins
+3. Install `live_brain` + `live_brain_ctx`
+4. Ask how to configure (manual instructions or auto-patch config.yaml)
+5. Verify imports
+
+Use `python install.py --auto` to skip the interactive prompt.
 
 ## Testing
 
@@ -154,6 +157,15 @@ python live_brain_ctx/tests/test_cross_platform.py
 5. **Platform-agnostic** — scope keys parameterized by platform (telegram/discord/slack/cli/web)
 
 ## Changelog
+
+- **2026-05-11** — ATLANTIS Cognitive Architecture:
+  - Tiered reasoning (Tier 1/2/3) with zero overhead for trivial queries
+  - Multi-perspective decomposition (structural/causal/temporal/analogical)
+  - Adversarial self-attack before delivering answers
+  - Confidence gate (forces research when <2 verified facts)
+  - Anti-downgrade: ruled_out state with constraint propagation across turns
+  - Cross-domain synthesis via SQLite (0 extra LLM calls)
+  - Cross-platform install script (`python install.py`)
 
 - **2026-05-11** — Production-readiness pass + external review remediation:
   - Migration 006 FTS5 fix (reserved `rowid` column)
