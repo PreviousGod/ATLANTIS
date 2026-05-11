@@ -74,6 +74,48 @@ def install_plugin(src: Path, dst: Path, name: str) -> bool:
     return True
 
 
+def install_deps(hh: Path, root: Path) -> None:
+    """Install Python dependencies into Hermes venv."""
+    import subprocess
+    req_file = root / "live_brain" / "requirements.txt"
+    if not req_file.exists():
+        print("  ⚠ requirements.txt not found, skipping")
+        return
+
+    # Find pip: hermes venv > system pip
+    venv_python = hh / "hermes-agent" / ".venv" / "bin" / "python"
+    if not venv_python.exists():
+        venv_python = hh / "hermes-agent" / "venv" / "bin" / "python"
+    if not venv_python.exists():
+        # Windows
+        venv_python = hh / "hermes-agent" / ".venv" / "Scripts" / "python.exe"
+    if not venv_python.exists():
+        print("  ⚠ Hermes venv not found, install manually:")
+        print(f"    pip install -r {req_file}")
+        return
+
+    try:
+        result = subprocess.run(
+            [str(venv_python), "-m", "pip", "install", "-q", "-r", str(req_file)],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode == 0:
+            print("  ✓ Dependencies installed (ddgs, tiktoken)")
+        else:
+            # Try uv fallback
+            result2 = subprocess.run(
+                ["uv", "pip", "install", "-q", "-r", str(req_file), "--python", str(venv_python)],
+                capture_output=True, text=True, timeout=60,
+            )
+            if result2.returncode == 0:
+                print("  ✓ Dependencies installed via uv (ddgs, tiktoken)")
+            else:
+                print(f"  ⚠ pip failed, install manually: {venv_python} -m pip install -r {req_file}")
+    except Exception as e:
+        print(f"  ⚠ Could not install deps: {e}")
+        print(f"    Install manually: pip install -r {req_file}")
+
+
 def verify_import(plugins_dir: Path) -> bool:
     """Quick import check."""
     sys.path.insert(0, str(plugins_dir))
@@ -185,7 +227,7 @@ def main():
     root = find_atlantis_root()
     hh = hermes_home()
 
-    print(f"[1/6] Detecting Hermes at: {hh}")
+    print(f"[1/7] Detecting Hermes at: {hh}")
     if not check_hermes(hh):
         sys.exit(1)
     print(f"  ✓ Hermes found")
@@ -193,11 +235,11 @@ def main():
 
     plugins_dir = hh / "plugins"
 
-    print("[2/6] Backing up existing plugins...")
+    print("[2/7] Backing up existing plugins...")
     backup(plugins_dir)
     print()
 
-    print("[3/6] Installing live_brain...")
+    print("[3/7] Installing live_brain...")
     lb_src = root / "live_brain"
     if not lb_src.exists():
         print(f"  ✗ Source not found: {lb_src}")
@@ -205,7 +247,7 @@ def main():
     install_plugin(lb_src, plugins_dir / "live_brain", "live_brain")
     print()
 
-    print("[4/6] Installing live_brain_ctx...")
+    print("[4/7] Installing live_brain_ctx...")
     ctx_src = root / "live_brain_ctx"
     if not ctx_src.exists():
         print(f"  ✗ Source not found: {ctx_src}")
@@ -213,7 +255,11 @@ def main():
     install_plugin(ctx_src, plugins_dir / "live_brain_ctx", "live_brain_ctx")
     print()
 
-    print("[5/6] Configuring Hermes...")
+    print("[5/7] Installing dependencies...")
+    install_deps(hh, root)
+    print()
+
+    print("[6/7] Configuring Hermes...")
     if "--auto" in sys.argv:
         auto_config = True
     else:
@@ -225,7 +271,7 @@ def main():
     configure_hermes(hh, auto=auto_config)
     print()
 
-    print("[6/6] Verifying installation...")
+    print("[7/7] Verifying installation...")
     verify_import(plugins_dir)
     print()
 
