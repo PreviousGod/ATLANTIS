@@ -75,3 +75,8 @@ def is_noisy_episode_memory(title: str, summary: str = '', user_text: str = '', 
     if upper_summary.startswith('TASK:') and normalized_text(summary_text[5:]) == normalized_text(title_text):
         return is_low_signal_thread_title(title_text) or len(title_text.split()) <= 2
     return False
+
+
+def sql_placeholders(count: int) -> str:
+    """Generate SQL placeholders for parameterized queries."""
+    return ','.join('?' for _ in range(count))

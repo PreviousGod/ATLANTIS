@@ -118,17 +118,44 @@ class CompositionEngine:
 
     def build_concept_vector(self, text: str) -> List[float]:
         """
-        Build vector from text using simple term frequency.
-        In production, could use embeddings.
+        Build vector from text using TF-IDF over fact corpus.
+        Falls back to term frequency if corpus unavailable.
         """
-        # Simple term frequency vector
         words = text.lower().split()
         vector = [0.0] * self.dimension
 
-        for i, word in enumerate(words):
-            # Hash word to dimension index
-            hash_val = hash(word) % self.dimension
-            vector[hash_val] += 1.0
+        try:
+            # Get document count for IDF calculation
+            doc_count = self.conn.execute("SELECT COUNT(*) FROM facts WHERE status='active'").fetchone()[0]
+            if doc_count == 0:
+                raise Exception("No facts for IDF")
+
+            # Calculate TF-IDF for each word
+            for word in words:
+                if len(word) < 3:
+                    continue
+
+                # Term frequency in this text
+                tf = words.count(word) / len(words)
+
+                # Document frequency: how many facts contain this word
+                df = self.conn.execute(
+                    "SELECT COUNT(*) FROM facts WHERE status='active' AND fact_text LIKE ?",
+                    (f'%{word}%',)
+                ).fetchone()[0]
+
+                # IDF: log(total_docs / (1 + docs_with_term))
+                idf = 1.0 if df == 0 else (1.0 + (doc_count / (1.0 + df)) ** 0.5)
+
+                # Map word to dimension using hash, but weight by TF-IDF
+                hash_val = hash(word) % self.dimension
+                vector[hash_val] += tf * idf
+
+        except Exception:
+            # Fallback to simple term frequency
+            for word in words:
+                hash_val = hash(word) % self.dimension
+                vector[hash_val] += 1.0
 
         # Normalize
         magnitude = sum(x * x for x in vector) ** 0.5

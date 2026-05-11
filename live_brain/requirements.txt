@@ -1,0 +1,16 @@
+# live_brain plugin dependencies
+#
+# Install inside the Hermes venv:
+#
+#   /home/deyaan666/.hermes/hermes-agent/venv/bin/pip install -r requirements.txt
+#
+
+# Web research for the epistemic layer. The project moved from
+# `duckduckgo_search` to `ddgs`; we prefer `ddgs` and keep `duckduckgo_search`
+# as a transitional fallback for older deployments that have not migrated.
+ddgs>=9.0.0
+duckduckgo_search>=6.0.0  ; extra == "legacy"
+
+# Optional but strongly recommended for token-accurate context budgeting.
+# The retrieval layer falls back to a rough char/4 estimator if missing.
+tiktoken>=0.5.0

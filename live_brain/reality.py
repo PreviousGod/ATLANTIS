@@ -1,12 +1,44 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from .utils import stable_id
+
+logger = logging.getLogger(__name__)
+
+# Load domain configuration from JSON. If the file is missing, unreadable, or
+# contains invalid JSON, fall back to an empty config rather than breaking
+# the entire module import — a broken JSON should degrade the plugin, not
+# take down the whole provider at startup.
+_config_path = Path(__file__).parent / "domains_config.json"
+try:
+    with open(_config_path, encoding="utf-8") as _f:
+        _config = json.load(_f)
+    if not isinstance(_config, dict):
+        logger.warning(
+            "[live_brain] domains_config.json is not a JSON object (%s); using empty defaults",
+            type(_config).__name__,
+        )
+        _config = {}
+except FileNotFoundError:
+    logger.warning(
+        "[live_brain] domains_config.json not found at %s; using empty defaults",
+        _config_path,
+    )
+    _config = {}
+except (json.JSONDecodeError, OSError) as _exc:
+    logger.error(
+        "[live_brain] domains_config.json unreadable (%s: %s); using empty defaults",
+        type(_exc).__name__,
+        _exc,
+    )
+    _config = {}
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS reality_events (
@@ -138,9 +170,8 @@ _TOOL_RESULT_SIGNAL_ALLOWLIST = {
 }
 
 _PROJECT_PATTERNS = {
-    'live_brain': re.compile(r'\b(live\s*brain|reality\s+engine|control\s*room|dashboard|hermes|tailscale)\b', re.I),
-    'enoch': re.compile(r'\benoch\b', re.I),
-    'mempalace': re.compile(r'\bmempalace\b', re.I),
+    name: re.compile(pattern, re.I)
+    for name, pattern in (_config.get("projects") or {}).items()
 }
 
 _HIGH_RISK_ACTIONS = {
@@ -228,45 +259,28 @@ def extract_signals(event_type: str, subject: str, payload: Dict[str, Any]) -> L
 
 
 _DOMAIN_RELEVANCE = {
-    'financial': (
-        {'financial_trading_request'},
-        ('funded', 'trading', 'trejd', 'trade', 'broker', 'forex', 'prop firm', 'apex', 'cme', 'nq', 'account'),
-    ),
-    'youtube': (
-        {'youtube_monetization'},
-        ('youtube', 'shorts', 'monetiz', 'zarad', 'pare', 'pregled', 'affiliate', 'merch', 'patreon'),
-    ),
-    'dashboard': (
-        {'request_dashboard', 'request_link', 'auth_friction', 'connection_refused', 'service_reachable'},
-        ('dashboard', 'tailscale', 'link', 'url', 'token', 'auth', 'service', 'port', 'connection refused', '100.'),
-    ),
-    'telegram': (
-        {'request_telegram_delivery'},
-        ('telegram', 'telwgram', 'telegrm', 'posalj', 'pošalj', 'send_message', 'delivery'),
-    ),
-    'demo': (
-        {'request_demo'},
-        ('demo', 'teaser', 'public demo', 'synthetic', 'video'),
-    ),
-    'approval': (
-        {'request_approval', 'approval_visibility_problem', 'permission_blocked'},
-        ('approval', 'approve', 'odobri', 'pending', 'self-evol', 'self evolution', 'sandbox', 'permission'),
-    ),
-    'live_brain': (
-        {'implement_change', 'quality_pushback', 'project:live_brain'},
-        ('live brain', 'reality engine', 'hermes', 'plugin', 'memory', 'context', 'agent', 'dashboard'),
-    ),
+    domain: (set(data.get("signals") or []), tuple(data.get("keywords") or []))
+    for domain, data in (_config.get("domains") or {}).items()
+    if isinstance(data, dict)
 }
 
 _OBJECTIVE_RELEVANCE = {
-    'evaluate_financial_trading_request_safely': ('financial',),
-    'find_youtube_shorts_monetization_path': ('youtube',),
-    'send_requested_plan_or_artifact_to_telegram': ('telegram',),
-    'prepare_or_send_public_demo_package': ('demo',),
-    'provide_current_dashboard_or_demo_link': ('dashboard',),
-    'implement_live_brain_reality_engine': ('live_brain',),
-    'raise_live_brain_positioning_and_design_bar': ('live_brain',),
+    objective: tuple(domains)
+    for objective, domains in (_config.get("objectives") or {}).items()
 }
+
+_OBJECTIVE_LOOP_KEYS = {
+    'evaluate_financial_trading_request_safely': 'financial_trading_request',
+    'find_youtube_shorts_monetization_path': 'youtube_monetization',
+    'send_requested_plan_or_artifact_to_telegram': 'telegram_delivery',
+    'prepare_or_send_public_demo_package': 'public_demo_package',
+    'provide_current_dashboard_or_demo_link': 'dashboard_link',
+    'implement_live_brain_reality_engine': 'implement_reality_engine',
+}
+_STALE_COMPLETED_OBJECTIVE_SECONDS = {
+    'implement_live_brain_reality_engine': 6 * 3600,
+}
+_STALE_OPEN_LOOP_SECONDS = 7 * 86400
 
 _PROJECT_RELEVANCE = {
     'live_brain': ('live_brain', 'dashboard'),
@@ -350,13 +364,13 @@ def _brief_text_relevant(text: str, query: str, signals: set[str], followup: boo
     if followup:
         return True
     lowered = text.lower()
-    matched_domain = False
-    for domain, (_, terms) in _DOMAIN_RELEVANCE.items():
-        if _has_any_term(lowered, terms) or domain in lowered:
-            matched_domain = True
-            if _query_matches_domain(domain, query, signals):
-                return True
-    if matched_domain:
+    text_domains = [
+        domain for domain, (_, terms) in _DOMAIN_RELEVANCE.items()
+        if _has_any_term(lowered, terms) or domain in lowered
+    ]
+    if text_domains:
+        if any(_query_matches_domain(domain, query, signals) for domain in text_domains):
+            return True
         return False
     return bool(_query_words(query) & _query_words(text))
 
@@ -577,8 +591,8 @@ class RealityEngine:
             reductions.append(self._state(event, 'safe_next_action', {'action': 'Reduce choice overload: propose one concrete low-risk next step, not a menu of generic options.'}, 'safe next action inferred from decision fatigue', confidence=0.78, ttl_seconds=24 * 3600))
         if loop_key:
             reductions.append(self._open_loop(event, loop_key, title, safe_next, 'user request opened/refreshes work loop', priority=0.82))
-        if objective in {'find_youtube_shorts_monetization_path', 'evaluate_financial_trading_request_safely'}:
-            reductions.append(self._close_loop(event, 'public_demo_package', 'superseded by current user priority'))
+            for other_loop_key in set(_OBJECTIVE_LOOP_KEYS.values()) - {loop_key}:
+                reductions.append(self._close_loop(event, other_loop_key, 'superseded by current user objective'))
         if 'request_link' in signals and 'short_reference' in signals:
             reductions.append(self._state(event, 'likely_user_intent', {'intent': 'request_current_link', 'do_not_ask_generic_which_link': True}, 'short reference resolved from active reality', confidence=0.76, ttl_seconds=6 * 3600))
         return reductions
@@ -852,6 +866,38 @@ class RealityEngine:
         for table in ('reality_state', 'action_constraints'):
             cur = self.conn.execute(f"DELETE FROM {table} WHERE expires_at IS NOT NULL AND expires_at <= ?", (now,))
             count += cur.rowcount if cur.rowcount is not None else 0
+        stale_loop_cutoff = now - _STALE_OPEN_LOOP_SECONDS
+        cur = self.conn.execute(
+            "UPDATE open_loops SET status='resolved', updated_at=?, resolved_at=? WHERE status IN ('active','blocked') AND updated_at <= ?",
+            (now, now, stale_loop_cutoff),
+        )
+        count += cur.rowcount if cur.rowcount is not None else 0
+        objective_rows = self.conn.execute(
+            "SELECT scope_key, value_json, updated_at FROM reality_state WHERE state_key='current_objective'"
+        ).fetchall()
+        for row in objective_rows:
+            value = loads(row['value_json'], {})
+            objective = str(value.get('objective') or '')
+            updated_at = float(row['updated_at'] or 0)
+            loop_key = _OBJECTIVE_LOOP_KEYS.get(objective, '')
+            loop_resolved = False
+            if loop_key:
+                loop_id = stable_id('open_loop', row['scope_key'], loop_key)
+                loop = self.conn.execute("SELECT status FROM open_loops WHERE loop_id=?", (loop_id,)).fetchone()
+                loop_resolved = bool(loop and str(loop['status']) == 'resolved')
+            stale_completed = objective in _STALE_COMPLETED_OBJECTIVE_SECONDS and updated_at <= now - _STALE_COMPLETED_OBJECTIVE_SECONDS[objective]
+            if loop_resolved or stale_completed:
+                cur = self.conn.execute(
+                    "DELETE FROM reality_state WHERE scope_key=? AND state_key='current_objective'",
+                    (row['scope_key'],),
+                )
+                count += cur.rowcount if cur.rowcount is not None else 0
+                if objective == 'implement_live_brain_reality_engine':
+                    cur = self.conn.execute(
+                        "DELETE FROM reality_state WHERE scope_key=? AND state_key='safe_next_action' AND value_json LIKE '%event-sourced reality schema%'",
+                        (row['scope_key'],),
+                    )
+                    count += cur.rowcount if cur.rowcount is not None else 0
         self.conn.commit()
         return count
 

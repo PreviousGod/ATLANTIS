@@ -16,8 +16,28 @@ class CausalManager:
         """Invalidate multiple beliefs and their dependents. Used after supersession."""
         if not self._store:
             return
-        for bid in belief_ids:
-            self._store.invalidate_belief(bid)
+
+        invalidated = set()
+        to_process = list(belief_ids)
+
+        while to_process:
+            current = to_process.pop()
+            if current in invalidated:
+                continue
+
+            # Mark as invalidated
+            self._store.invalidate_belief(current)
+            invalidated.add(current)
+
+            # Find dependent beliefs
+            try:
+                deps = self.conn.execute(
+                    "SELECT dependent_belief_id FROM belief_dependencies WHERE source_belief_id = ?",
+                    (current,)
+                ).fetchall()
+                to_process.extend(row[0] for row in deps)
+            except Exception:
+                pass  # Table might not exist in older schemas
 
     def mark_belief(self, belief_id: str | None, claim_text: str, action: str, evidence_text: str | None = None, session_id: str = '', scope_key: str = '', caused_by_work_item_id: str = '') -> dict:
         now = time.time()

@@ -1,0 +1,46 @@
+{
+  "domains": {
+    "financial": {
+      "signals": ["financial_trading_request"],
+      "keywords": ["funded", "trading", "trejd", "trade", "broker", "forex", "prop firm", "apex", "cme", "nq", "account"]
+    },
+    "youtube": {
+      "signals": ["youtube_monetization"],
+      "keywords": ["youtube", "shorts", "monetiz", "zarad", "pare", "pregled", "affiliate", "merch", "patreon"]
+    },
+    "dashboard": {
+      "signals": ["request_dashboard", "request_link", "auth_friction", "connection_refused", "service_reachable"],
+      "keywords": ["dashboard", "tailscale", "link", "url", "token", "auth", "service", "port", "connection refused", "100."]
+    },
+    "telegram": {
+      "signals": ["request_telegram_delivery"],
+      "keywords": ["telegram", "telwgram", "telegrm", "posalj", "pošalj", "send_message", "delivery"]
+    },
+    "demo": {
+      "signals": ["request_demo"],
+      "keywords": ["demo", "teaser", "public demo", "synthetic", "video"]
+    },
+    "approval": {
+      "signals": ["request_approval", "approval_visibility_problem", "permission_blocked"],
+      "keywords": ["approval", "approve", "odobri", "pending", "self-evol", "self evolution", "sandbox", "permission"]
+    },
+    "live_brain": {
+      "signals": ["implement_change", "quality_pushback", "project:live_brain"],
+      "keywords": ["live brain", "reality engine", "hermes", "plugin", "memory", "context", "agent", "dashboard"]
+    }
+  },
+  "projects": {
+    "live_brain": "\\b(live\\s*brain|reality\\s+engine|control\\s*room|dashboard|hermes|tailscale)\\b",
+    "enoch": "\\benoch\\b",
+    "mempalace": "\\bmempalace\\b"
+  },
+  "objectives": {
+    "evaluate_financial_trading_request_safely": ["financial"],
+    "find_youtube_shorts_monetization_path": ["youtube"],
+    "send_requested_plan_or_artifact_to_telegram": ["telegram"],
+    "prepare_or_send_public_demo_package": ["demo"],
+    "provide_current_dashboard_or_demo_link": ["dashboard"],
+    "implement_live_brain_reality_engine": ["live_brain"],
+    "raise_live_brain_positioning_and_design_bar": ["live_brain"]
+  }
+}

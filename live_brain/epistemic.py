@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import logging
 import re
 import time
 import urllib.parse
@@ -13,6 +14,8 @@ from urllib.parse import urlparse
 
 from .utils import stable_id
 from .audit import ensure_schema as ensure_audit_schema, record_evidence_packet, record_revision, row_to_dict
+
+logger = logging.getLogger(__name__)
 
 
 SCHEMA_SQL = """
@@ -230,13 +233,24 @@ def authority_for_url(url: str, context: str = '') -> str:
 
 
 def source_confidence(authority: str, base: float = 0.6) -> float:
-    if authority == 'official':
-        return max(base, 0.86)
-    if authority in {'primary_or_institutional', 'primary_or_support'}:
-        return max(base, 0.76)
-    if authority == 'secondary':
-        return max(base, 0.58)
-    return base
+    floors = {
+        'official': 0.86,
+        'primary_or_institutional': 0.76,
+        'primary_or_support': 0.76,
+        'secondary': 0.58,
+        'unknown': 0.5,
+    }
+    caps = {
+        'official': 0.90,
+        'primary_or_institutional': 0.82,
+        'primary_or_support': 0.82,
+        'secondary': 0.65,
+        'unknown': 0.55,
+    }
+    authority = authority or 'unknown'
+    floor = floors.get(authority, 0.5)
+    cap = caps.get(authority, 0.55)
+    return clamp(max(base, floor), 0.0, cap)
 
 
 _PROVIDER_TERMS = {'ftmo', 'topstep', 'apex', 'alpaca', 'interactivebrokers', 'interactive', 'tradovate', 'ninjatrader', 'cme'}
@@ -331,6 +345,27 @@ def ddg_instant_sources(question: str, *, timeout: float = 8.0) -> List[Tuple[st
 
 
 def ddg_html_sources(query_text: str, *, timeout: float = 10.0, limit: int = 10) -> List[Tuple[str, str, str]]:
+    # Try API first (robust). Upstream package was renamed from `duckduckgo_search`
+    # to `ddgs`; prefer the new name, fall back to the old alias for
+    # backward compatibility with older venvs.
+    try:
+        try:
+            from ddgs import DDGS  # type: ignore[import-not-found]
+        except ImportError:
+            from duckduckgo_search import DDGS  # type: ignore[import-not-found]
+        sources: List[Tuple[str, str, str]] = []
+        with DDGS() as ddgs:
+            for r in ddgs.text(query_text, max_results=limit):
+                url = r.get('href', '')
+                title = r.get('title', '')
+                if url and title:
+                    sources.append((url, title, title))
+        if sources:
+            return dedupe_sources(sources)
+    except Exception as e:
+        logger.warning(f"DDG API failed: {e}, falling back to HTML parsing")
+
+    # Fallback to HTML parsing
     query = urllib.parse.urlencode({'q': query_text})
     request = urllib.request.Request(
         f'https://html.duckduckgo.com/html/?{query}',
@@ -339,7 +374,8 @@ def ddg_html_sources(query_text: str, *, timeout: float = 10.0, limit: int = 10)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read().decode('utf-8', 'replace')
-    except Exception:
+    except Exception as e:
+        logger.error(f"DDG HTML parsing failed: {e}")
         return []
     sources: List[Tuple[str, str, str]] = []
     pattern = re.compile(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', re.I | re.S)
@@ -451,6 +487,15 @@ class EpistemicManager:
     def classify(self, question: str) -> EpistemicClassification:
         q = (question or '').strip()
         lowered = q.lower()
+
+        # Negative signals - internal requests, not external research
+        if re.search(r'\b(oceni|review|reci\s+mi|kazi\s+mi|tell\s+me|explain)\b', lowered):
+            return EpistemicClassification(False, 'internal_request', 0.9, 0.0, 0, 'none', 0, [])
+        if re.search(r'\b(kako\s+radi|how\s+does|what\s+is)\b', lowered):
+            return EpistemicClassification(False, 'explanatory_question', 0.9, 0.0, 0, 'none', 0, [])
+        if re.search(r'\b(summarize|sumarizuj|recap)\b', lowered):
+            return EpistemicClassification(False, 'summary_request', 0.9, 0.0, 0, 'none', 0, [])
+
         explicit = bool(_EXPLICIT_RESEARCH_RE.search(q))
         temporal = bool(_TEMPORAL_RE.search(q))
         high_stakes = bool(_HIGH_STAKES_RE.search(q))
@@ -555,11 +600,19 @@ class EpistemicManager:
         session_id = session_id or self.session_id or ''
         classification = self.classify(question)
         facts = self.recall_facts(scope_key, question)
-        if not classification.should_research or facts:
+        policy = classification.source_policy or {}
+        required_authority = policy.get('required_authority')
+        if required_authority == 'official_or_primary':
+            satisfying_facts = [fact for fact in facts if fact.get('authority') in _AUTHORITATIVE_AUTHORITIES and float(fact.get('confidence') or 0) >= 0.75]
+        elif required_authority == 'authoritative':
+            satisfying_facts = [fact for fact in facts if fact.get('authority') in _AUTHORITATIVE_AUTHORITIES or float(fact.get('confidence') or 0) >= 0.75]
+        else:
+            satisfying_facts = facts
+        if not classification.should_research or satisfying_facts:
             return {
                 'needs_research': False,
                 'reason': classification.reason,
-                'fresh_facts': facts,
+                'fresh_facts': satisfying_facts,
                 'classification': classification.__dict__,
             }
         now = time.time()
@@ -1015,6 +1068,10 @@ class EpistemicManager:
         scope_key = scope_key or self.scope_key or 'global'
         facts = self.recall_facts(scope_key, question, limit=max_facts)
         plan = self.plan_if_needed(scope_key, question, session_id=self.session_id)
+        policy = ((plan.get('classification') or {}).get('source_policy') or {}) if isinstance(plan.get('classification'), dict) else {}
+        required_authority = policy.get('required_authority')
+        if required_authority in {'official_or_primary', 'authoritative'}:
+            facts = [fact for fact in facts if fact.get('authority') in _AUTHORITATIVE_AUTHORITIES and float(fact.get('confidence') or 0) >= 0.75]
         lines: List[str] = []
         if facts:
             for fact in facts[:max_facts]:

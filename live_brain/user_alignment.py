@@ -26,47 +26,98 @@ class UserAlignmentTracker:
         scope_key: str
     ) -> List[Dict[str, Any]]:
         """
-        Extract user preferences from text.
-
-        Patterns:
-        - "I prefer X"
-        - "Always use Y"
-        - "Never do Z"
-        - "I like when you X"
+        Extract user preferences from text with comprehensive pattern matching.
         """
         preferences = []
         now = time.time()
 
-        # Pattern 1: "I prefer X" / "Ja preferiram X"
-        prefer_match = re.search(r'(?:I|Ja)\s+(?:prefer|preferiram)\s+([^.!?]+)', user_text, re.IGNORECASE)
+        # Pattern 1: Explicit preference "I prefer X over Y"
+        prefer_match = re.search(r'(?:I|Ja)\s+(?:prefer|preferiram)\s+([^.!?]+?)(?:\s+(?:over|to|instead of)\s+([^.!?]+))?', user_text, re.IGNORECASE)
         if prefer_match:
-            preference_value = prefer_match.group(1).strip()
             preferences.append({
-                'preference_key': 'general_preference',
-                'preference_value': preference_value,
+                'preference_key': 'explicit_preference',
+                'preference_value': prefer_match.group(1).strip(),
                 'preference_type': 'communication_style',
                 'confidence': 0.9
             })
 
-        # Pattern 2: "Always use X" / "Never use Y"
-        always_match = re.search(r'(?:always|uvek)\s+(?:use|koristi)\s+([^.!?]+)', user_text, re.IGNORECASE)
+        # Pattern 2: Absolute constraints "always/never"
+        always_match = re.search(r'(?:always|uvek)\s+([^.!?]+)', user_text, re.IGNORECASE)
         if always_match:
-            tool_name = always_match.group(1).strip()
             preferences.append({
-                'preference_key': f'tool_preference_{tool_name.lower()}',
-                'preference_value': tool_name,
-                'preference_type': 'tool_preference',
+                'preference_key': f'always_{always_match.group(1)[:20].lower()}',
+                'preference_value': always_match.group(1).strip(),
+                'preference_type': 'absolute_constraint',
+                'confidence': 1.0
+            })
+
+        never_match = re.search(r'(?:never|nikad)\s+([^.!?]+)', user_text, re.IGNORECASE)
+        if never_match:
+            preferences.append({
+                'preference_key': f'never_{never_match.group(1)[:20].lower()}',
+                'preference_value': f"Never {never_match.group(1).strip()}",
+                'preference_type': 'absolute_constraint',
+                'confidence': 1.0
+            })
+
+        # Pattern 3: Implicit preferences "I usually/typically/often"
+        implicit_match = re.search(r'I\s+(?:usually|typically|often|tend to)\s+([^.!?]+)', user_text, re.IGNORECASE)
+        if implicit_match:
+            preferences.append({
+                'preference_key': 'implicit_preference',
+                'preference_value': implicit_match.group(1).strip(),
+                'preference_type': 'communication_style',
+                'confidence': 0.7
+            })
+
+        # Pattern 4: Negative preferences "I don't like when"
+        dislike_match = re.search(r'I\s+(?:don\'t|do not|dont)\s+(?:like|want)\s+(?:when\s+)?([^.!?]+)', user_text, re.IGNORECASE)
+        if dislike_match:
+            preferences.append({
+                'preference_key': 'negative_preference',
+                'preference_value': f"Avoid: {dislike_match.group(1).strip()}",
+                'preference_type': 'constraint',
+                'confidence': 0.9
+            })
+
+        # Pattern 5: Strong negative "I hate when"
+        hate_match = re.search(r'I\s+(?:hate|dislike)\s+(?:when\s+)?([^.!?]+)', user_text, re.IGNORECASE)
+        if hate_match:
+            preferences.append({
+                'preference_key': 'strong_negative',
+                'preference_value': f"Strongly avoid: {hate_match.group(1).strip()}",
+                'preference_type': 'constraint',
                 'confidence': 0.95
             })
 
-        never_match = re.search(r'(?:never|nikad)\s+(?:use|do|koristi|radi)\s+([^.!?]+)', user_text, re.IGNORECASE)
-        if never_match:
-            constraint = never_match.group(1).strip()
+        # Pattern 6: Polite requests "please try to"
+        please_match = re.search(r'(?:please|molim)\s+(?:try to\s+)?([^.!?]+)', user_text, re.IGNORECASE)
+        if please_match:
             preferences.append({
-                'preference_key': f'constraint_{constraint.lower()[:20]}',
-                'preference_value': f"Never {constraint}",
-                'preference_type': 'constraint',
-                'confidence': 0.95
+                'preference_key': 'polite_request',
+                'preference_value': please_match.group(1).strip(),
+                'preference_type': 'communication_style',
+                'confidence': 0.6
+            })
+
+        # Pattern 7: Conditional "don't X when Y"
+        conditional_match = re.search(r'(?:don\'t|do not)\s+([^.!?]+?)\s+when\s+([^.!?]+)', user_text, re.IGNORECASE)
+        if conditional_match:
+            preferences.append({
+                'preference_key': 'conditional_constraint',
+                'preference_value': f"Don't {conditional_match.group(1).strip()} when {conditional_match.group(2).strip()}",
+                'preference_type': 'conditional_constraint',
+                'confidence': 0.85
+            })
+
+        # Pattern 8: Positive reinforcement "I like when you"
+        like_match = re.search(r'I\s+like\s+(?:when\s+you\s+|it when\s+)?([^.!?]+)', user_text, re.IGNORECASE)
+        if like_match:
+            preferences.append({
+                'preference_key': 'positive_reinforcement',
+                'preference_value': like_match.group(1).strip(),
+                'preference_type': 'communication_style',
+                'confidence': 0.8
             })
 
         # Store preferences

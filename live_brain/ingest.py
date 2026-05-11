@@ -748,7 +748,12 @@ class Ingestor:
         atomized_assistant = _atomize_fact(assistant_text) if assistant_text else ''
         # Deduplicate against existing beliefs: if the atomized text already exists as a belief, skip storing as fact
         existing_beliefs = set()
-        rows = self.conn.execute("SELECT LOWER(claim_text) FROM beliefs").fetchall()
+        rows = self.conn.execute(
+            """SELECT LOWER(claim_text) FROM beliefs
+            WHERE (? = '' OR scope_key IN (?, ''))
+            ORDER BY updated_at DESC LIMIT 500""",
+            (scope_key or '', scope_key or ''),
+        ).fetchall()
         for row in rows:
             existing_beliefs.add(row[0][:200])
         if atomized_user and atomized_user[:200].lower() in existing_beliefs:
@@ -1316,9 +1321,10 @@ class Ingestor:
             )
 
     def _refresh_working_set(self, scope_key: str) -> None:
+        limit = 5
         rows = self.conn.execute(
-            "SELECT work_item_id FROM work_items WHERE scope_key = ? AND status IN ('active','blocked') AND lower(title) NOT IN ('da','ne','ok','okej','sve','yes','no','continue','nastavi') ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, priority DESC, updated_at DESC LIMIT 3",
-            (scope_key,),
+            "SELECT work_item_id FROM work_items WHERE scope_key = ? AND status IN ('active','blocked') AND lower(title) NOT IN ('da','ne','ok','okej','sve','yes','no','continue','nastavi') ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, priority DESC, updated_at DESC LIMIT ?",
+            (scope_key, limit),
         ).fetchall()
         self.conn.execute("DELETE FROM working_set WHERE scope_key = ?", (scope_key,))
         now = time.time()
@@ -1612,8 +1618,18 @@ class Ingestor:
         user_lowered = (user_text or '').lower()
         if 'live_brain_capability_e2e' in user_lowered:
             return
-        review_only_terms = ('review', 'pregled', 'recenz', 'verdikt')
-        missing_inquiry_terms = ('šta fali', 'sta fali', 'what is missing', 'hard blocker', 'nema hard blocker', 'nice-to-have')
+        negative_signals = (
+            'oceni', 'ocena', 'rate ', 'rating', 'score ', 'scorecard', 'evaluate', 'evaluation',
+            'analiziraj', 'analiza', 'analyze', 'analysis', 'reci mi', 'tell me', 'objasni', 'explain',
+            'review', 'pregled', 'recap', 'sumarizuj', 'pregledaj', 'kako bi', 'how would',
+            'what do you think', 'misliš', 'mislis', 'jesi li', 'da li si', 'are you done',
+            'did you finish', 'have you finished', 'kako ide', 'how is it going', 'sta je bilo',
+            'šta je bilo', 'what happened', 'status', 'progress', 'update', 'dokle si', 'where are you',
+        )
+        if any(term in user_lowered for term in negative_signals):
+            return
+        review_only_terms = ('review', 'pregled', 'recenz', 'verdikt', 'analiziraj', 'analiza', 'analyze', 'analysis')
+        missing_inquiry_terms = ('šta fali', 'sta fali', 'šta još fali', 'sta jos fali', 'what is missing', 'hard blocker', 'nema hard blocker', 'nice-to-have')
         change_terms = ('implement', 'patch', 'fix', 'sredi', 'poprav', 'change', 'promeni', 'promijeni', 'dodaj')
         user_for_change_terms = user_lowered.replace('must_fix_next', '')
         if any(term in user_lowered for term in review_only_terms + missing_inquiry_terms) and not any(term in user_for_change_terms for term in change_terms):

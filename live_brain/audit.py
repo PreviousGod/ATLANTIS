@@ -260,3 +260,22 @@ def record_evidence_packet(
         created_at=now,
     )
     return evidence_packet_id
+
+
+def audit_log_insert(
+    conn,
+    object_type: str,
+    object_id: str,
+    action: str,
+    reason: str,
+    details: dict = None
+):
+    """Insert audit log entry."""
+    audit_id = f"audit:{object_type}:{object_id}:{action}:{int(time.time())}"
+    conn.execute(
+        """INSERT OR REPLACE INTO audit_log 
+           (audit_id, object_type, object_id, action, reason, details_json, created_at) 
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (audit_id, object_type, object_id, action, reason, 
+         json.dumps(details or {}), time.time())
+    )

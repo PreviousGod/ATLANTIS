@@ -169,32 +169,37 @@ class EntityGraph:
         entity_name = entity_row[0]
         lines = [f"Entity: {entity_name}"]
 
-        # Get related entities
-        related = self.get_related_entities(entity_id, max_depth=1)
+        # Get related entities with depth=2 for better coverage
+        related = self.get_related_entities(entity_id, max_depth=2)
         if related:
+            # Sort by relationship strength
+            related.sort(key=lambda x: x['strength'], reverse=True)
             lines.append(f"Related entities ({len(related)}):")
             for rel in related[:5]:
-                lines.append(f"  - {rel['relationship_type']}: {rel['canonical_name']}")
+                lines.append(f"  - {rel['relationship_type']}: {rel['canonical_name']} (strength: {rel['strength']:.2f})")
 
-        # Get related facts
+        # Get related facts using proper JOIN with subject_entity_id
         if include_facts:
             facts = self.conn.execute(
-                """SELECT fact_text FROM facts
-                   WHERE status='active' AND fact_text LIKE ?
-                   ORDER BY valid_from DESC LIMIT 3""",
-                (f"%{entity_name}%",)
+                """SELECT f.fact_text, f.confidence
+                   FROM facts f
+                   WHERE f.status='active' AND (f.subject_entity_id = ? OR f.subject_entity_id IN (
+                       SELECT entity_b_id FROM entity_relationships WHERE entity_a_id = ?
+                   ))
+                   ORDER BY f.confidence DESC, f.valid_from DESC LIMIT 5""",
+                (entity_id, entity_id)
             ).fetchall()
             if facts:
                 lines.append("Related facts:")
                 for fact in facts:
                     lines.append(f"  - {fact[0][:100]}")
 
-        # Get related beliefs
+        # Get related beliefs (keep LIKE for now as beliefs table lacks entity_id)
         if include_beliefs:
             beliefs = self.conn.execute(
-                """SELECT claim_text, belief_kind FROM beliefs
+                """SELECT claim_text, belief_kind, confidence FROM beliefs
                    WHERE status IN ('open', 'validated') AND claim_text LIKE ?
-                   ORDER BY created_at DESC LIMIT 3""",
+                   ORDER BY confidence DESC, created_at DESC LIMIT 3""",
                 (f"%{entity_name}%",)
             ).fetchall()
             if beliefs:

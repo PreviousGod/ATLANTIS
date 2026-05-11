@@ -1,9 +1,21 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from typing import Any, Dict, List
+
+try:
+    import tiktoken
+    TIKTOKEN_AVAILABLE = True
+except ImportError:
+    TIKTOKEN_AVAILABLE = False
+
+logger = logging.getLogger(__name__)
+
+# Maximum tokens for entire briefing context
+MAX_CONTEXT_TOKENS = 8000
 
 # Token budget per briefing section (approximate word count)
 SECTION_BUDGETS = {
@@ -35,6 +47,31 @@ def _marker_conflicts(query_text: str, row_text: str) -> bool:
     query_tokens = _marker_tokens(query_text)
     row_tokens = _marker_tokens(row_text)
     return bool(query_tokens and row_tokens and query_tokens.isdisjoint(row_tokens))
+
+
+def count_tokens(text: str, model: str = "gpt-4") -> int:
+    """Count tokens in text using tiktoken."""
+    if not TIKTOKEN_AVAILABLE:
+        return len(text) // 4  # Rough estimate: 4 chars per token
+    try:
+        enc = tiktoken.encoding_for_model(model)
+        return len(enc.encode(text))
+    except Exception:
+        return len(text) // 4
+
+
+def truncate_briefing(briefing: str, max_tokens: int = MAX_CONTEXT_TOKENS) -> str:
+    """Truncate briefing if it exceeds token limit."""
+    token_count = count_tokens(briefing)
+    if token_count <= max_tokens:
+        return briefing
+
+    logger.warning(f"Briefing exceeds token limit: {token_count} > {max_tokens}, truncating")
+
+    # Simple truncation: keep first 80% of max tokens
+    target_chars = int((max_tokens * 0.8) * 4)  # Rough estimate
+    truncated = briefing[:target_chars] + "\n\n[... briefing truncated due to length]"
+    return truncated
 
 SKIP_ITEM_TITLES = frozenset([
     'zdravo', 'hello', 'hi', 'test ping', 'pong',
@@ -223,7 +260,8 @@ class RetrievalRouter:
             section_lines.append(stripped)
 
         flush_section(current_section, section_lines)
-        return '\n'.join(result)
+        briefing = '\n'.join(result)
+        return truncate_briefing(briefing, MAX_CONTEXT_TOKENS)
 
     def _load_state(self, scope_key: str) -> Dict[str, Any]:
         row = self.conn.execute(
