@@ -174,25 +174,34 @@ def _load_live_brain_ingestor_class():
         return Ingestor
     except Exception:
         pass
-    import importlib.util as _importlib_util
-    import sys as _sys
-    import types as _types
-    package_name = '_live_brain_ctx_live_brain'
-    live_brain_dir = Path(__file__).resolve().parent.parent.parent / 'live_brain'
-    if package_name not in _sys.modules:
-        package = _types.ModuleType(package_name)
-        package.__path__ = [str(live_brain_dir)]
-        _sys.modules[package_name] = package
-    for module_name in ['scopes', 'ingest']:
-        full_name = f'{package_name}.{module_name}'
-        if full_name in _sys.modules:
-            continue
-        spec = _importlib_util.spec_from_file_location(full_name, live_brain_dir / f'{module_name}.py')
-        if spec is None or spec.loader is None:
-            raise ImportError(f'Cannot load {module_name} from {live_brain_dir}')
-        module = _importlib_util.module_from_spec(spec)
-        module.__package__ = package_name
-        _sys.modules[full_name] = module
+    try:
+        import importlib.util as _importlib_util
+        import sys as _sys
+        import types as _types
+        package_name = '_live_brain_ctx_live_brain'
+        live_brain_dir = Path(__file__).resolve().parent.parent.parent / 'live_brain'
+        if not live_brain_dir.exists():
+            live_brain_dir = Path(__file__).resolve().parent.parent.parent.parent / 'live_brain'
+        if not live_brain_dir.exists():
+            return None
+        if package_name not in _sys.modules:
+            package = _types.ModuleType(package_name)
+            package.__path__ = [str(live_brain_dir)]
+            _sys.modules[package_name] = package
+        for module_name in ['scopes', 'ingest']:
+            full_name = f'{package_name}.{module_name}'
+            if full_name in _sys.modules:
+                continue
+            spec = _importlib_util.spec_from_file_location(full_name, live_brain_dir / f'{module_name}.py')
+            if spec is None or spec.loader is None:
+                return None
+            module = _importlib_util.module_from_spec(spec)
+            module.__package__ = package_name
+            _sys.modules[full_name] = module
+            spec.loader.exec_module(module)
+        return _sys.modules[f'{package_name}.ingest'].Ingestor
+    except Exception:
+        return None
         spec.loader.exec_module(module)
     return _sys.modules[f'{package_name}.ingest'].Ingestor
 
@@ -491,17 +500,18 @@ def _record_tool_result(tool_name: str, args: Any, result: Any, session_id: str 
             # to session_id when sender is empty regardless of platform.
             scope_key = _extract_scope_key(user_text, '', session_id)
         Ingestor = _load_live_brain_ingestor_class()
-        Ingestor(conn).store_tool_result_event(
-            tool_name,
-            args if isinstance(args, dict) else {},
-            result,
-            session_id=session_id,
-            tool_call_id=tool_call_id,
-            scope_key=scope_key,
-            user_text=user_text,
-            created_at=created_at,
-            duration_ms=duration_ms,
-        )
+        if Ingestor is not None:
+            Ingestor(conn).store_tool_result_event(
+                tool_name,
+                args if isinstance(args, dict) else {},
+                result,
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                scope_key=scope_key,
+                user_text=user_text,
+                created_at=created_at,
+                duration_ms=duration_ms,
+            )
         result_text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
         success = True
         try:
@@ -678,6 +688,14 @@ def _record_context_impression(scope_key: str, session_id: str, user_message: st
 
 
 def _pre_llm_call(**kwargs):
+    try:
+        return _pre_llm_call_inner(**kwargs)
+    except Exception as e:
+        logger.warning("[LIVE_BRAIN_CTX] _pre_llm_call failed: %s", e)
+        return None
+
+
+def _pre_llm_call_inner(**kwargs):
     user_message = str(kwargs.get("user_message") or "")
     session_id = str(kwargs.get("session_id") or "")
     sender_id = str(kwargs.get("sender_id") or "")
