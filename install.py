@@ -181,9 +181,7 @@ def main():
     print("╚══════════════════════════════════════════╝")
     print()
 
-    # Parse --auto flag
-    auto_config = "--auto" in sys.argv
-
+    # Parse --auto flag (skip interactive prompt)
     root = find_atlantis_root()
     hh = hermes_home()
 
@@ -216,10 +214,14 @@ def main():
     print()
 
     print("[5/6] Configuring Hermes...")
-    if not auto_config:
-        print("  Mode: manual (use --auto to auto-patch config.yaml)")
+    if "--auto" in sys.argv:
+        auto_config = True
     else:
-        print("  Mode: auto-patch")
+        print("  How to configure config.yaml?")
+        print("    1) Show me what to add (manual)")
+        print("    2) Auto-patch config.yaml")
+        choice = input("  Choose [1/2]: ").strip()
+        auto_config = choice == "2"
     configure_hermes(hh, auto=auto_config)
     print()
 
