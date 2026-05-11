@@ -26,6 +26,7 @@ class QueryContext:
     continuation_query: bool
     now: float
     ttl_cutoff: float
+    session_id: str = ""
 
 
 @dataclass

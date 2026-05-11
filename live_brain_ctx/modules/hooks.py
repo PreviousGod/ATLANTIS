@@ -212,7 +212,7 @@ def _prepare_query_context(user_message: str, sender_id: str, session_id: str, *
     query_words = [w for w in re.findall(r'[\w./-]+', query_lower) if len(w) > 3]
     active_tags = _active_tags(user_message, scope_key)
     return QueryContext(scope_key, query_lower, query_words, active_tags,
-                       continuation_query, now, ttl_cutoff)
+                       continuation_query, now, ttl_cutoff, session_id=session_id)
 
 
 def _load_live_brain_context(user_message: str, session_id: str, sender_id: str) -> str:
