@@ -168,12 +168,18 @@ MAX_RULED_OUT = 5
 # Ruled-out helpers
 # ---------------------------------------------------------------------------
 
-def record_ruled_out(session_id: str, approach: str, reason: str, db_conn: Optional[sqlite3.Connection] = None) -> None:
-    """Record a failed approach for constraint propagation."""
+def record_ruled_out(session_id: str, approach: str, reason: str, db_conn: Optional[sqlite3.Connection] = None, category: str = "reasoning") -> None:
+    """Record a failed approach for constraint propagation.
+
+    Categories:
+      reasoning   — failed reasoning/logic (injected into cognitive context)
+      development — code/tool execution failures (NOT injected)
+      attack      — skipped or weak attack step (injected)
+    """
     global _ruled_out_table_ensured
     if not session_id or not approach:
         return
-    entry = {"approach": approach[:200], "reason": reason[:200], "ts": time.time()}
+    entry = {"approach": approach[:200], "reason": reason[:200], "ts": time.time(), "category": category}
     with _ruled_out_lock:
         lst = _ruled_out_state.setdefault(session_id, [])
         lst.append(entry)
@@ -264,10 +270,11 @@ def get_cognitive_context(
     if fact_count < 2:
         parts.append(CONFIDENCE_GATE_MARKER)
 
-    # Ruled-out constraints (inter-turn propagation)
-    if ruled_out:
+    # Ruled-out constraints (inter-turn propagation) — skip development noise
+    user_facing_ruled_out = [e for e in ruled_out if e.get("category") != "development"]
+    if user_facing_ruled_out:
         constraint_lines = ["RULED OUT (do NOT repeat these approaches):"]
-        for entry in ruled_out:
+        for entry in user_facing_ruled_out:
             constraint_lines.append(f"  ✗ {entry['approach']} — because: {entry['reason']}")
         constraint_lines.append("Any new approach MUST NOT depend on the same assumptions that caused the above failures.")
         parts.append("\n".join(constraint_lines))
@@ -353,6 +360,7 @@ def ensure_ruled_out_table(db_conn: sqlite3.Connection) -> None:
             scope_key TEXT DEFAULT '',
             approach_text TEXT NOT NULL,
             reason TEXT NOT NULL,
+            category TEXT DEFAULT 'reasoning',
             created_at REAL NOT NULL
         )
     """)
@@ -360,14 +368,19 @@ def ensure_ruled_out_table(db_conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_ruled_out_session
         ON ruled_out_approaches(session_id, created_at DESC)
     """)
+    # Migration: add category column if table exists from older schema
+    try:
+        db_conn.execute("ALTER TABLE ruled_out_approaches ADD COLUMN category TEXT DEFAULT 'reasoning'")
+    except Exception:
+        pass
     db_conn.commit()
 
 
 def _persist_ruled_out(db_conn: sqlite3.Connection, session_id: str, entry: Dict[str, Any]) -> None:
     """Write a ruled_out entry to SQLite."""
     db_conn.execute(
-        "INSERT INTO ruled_out_approaches (session_id, approach_text, reason, created_at) VALUES (?, ?, ?, ?)",
-        (session_id, entry["approach"], entry["reason"], entry["ts"]),
+        "INSERT INTO ruled_out_approaches (session_id, approach_text, reason, category, created_at) VALUES (?, ?, ?, ?, ?)",
+        (session_id, entry["approach"], entry["reason"], entry.get("category", "reasoning"), entry["ts"]),
     )
     # FIFO: keep max 20 per session
     db_conn.execute(
@@ -383,7 +396,7 @@ def _persist_ruled_out(db_conn: sqlite3.Connection, session_id: str, entry: Dict
 def _load_ruled_out(db_conn: sqlite3.Connection, session_id: str) -> List[Dict[str, Any]]:
     """Load ruled_out entries from SQLite."""
     rows = db_conn.execute(
-        "SELECT approach_text, reason, created_at FROM ruled_out_approaches WHERE session_id=? ORDER BY created_at DESC LIMIT ?",
+        "SELECT approach_text, reason, category, created_at FROM ruled_out_approaches WHERE session_id=? ORDER BY created_at DESC LIMIT ?",
         (session_id, MAX_RULED_OUT),
     ).fetchall()
-    return [{"approach": r[0], "reason": r[1], "ts": r[2]} for r in reversed(rows)]
+    return [{"approach": r[0], "reason": r[1], "category": r[2] or "reasoning", "ts": r[3]} for r in reversed(rows)]

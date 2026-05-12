@@ -130,6 +130,39 @@ def run_tests():
 
     print()
     print("=" * 60)
+    print("CATEGORY FILTER TEST")
+    print("=" * 60)
+    # Simulate development noise being filtered out
+    from cognitive_architecture import get_cognitive_context
+    ctx_with_dev = get_cognitive_context(
+        "test", "sess_cat", 0,
+        db_conn=None, query_words=None,
+    )
+    # Manually populate in-memory state with mixed categories
+    from cognitive_architecture import record_ruled_out, _ruled_out_state
+    _ruled_out_state["sess_cat"] = [
+        {"approach": "patch(path=x)", "reason": "duplicate match", "ts": 0, "category": "development"},
+        {"approach": "bad_logic", "reason": "wrong assumption", "ts": 0, "category": "reasoning"},
+        {"approach": "skipped_attack", "reason": "no marker", "ts": 0, "category": "attack"},
+    ]
+    ctx_filtered = get_cognitive_context(
+        "how do you think about this system", "sess_cat", 0,
+        db_conn=None, query_words=None,
+    )
+    has_dev = "patch(path=x)" in ctx_filtered
+    has_reasoning = "bad_logic" in ctx_filtered
+    has_attack = "skipped_attack" in ctx_filtered
+    status = "PASS" if (not has_dev and has_reasoning and has_attack) else "FAIL"
+    if status == "PASS":
+        passed += 1
+    else:
+        failed += 1
+    print(f"  [{status}] category_filter: dev_visible={has_dev} reasoning_visible={has_reasoning} attack_visible={has_attack}")
+    # Clean up
+    del _ruled_out_state["sess_cat"]
+
+    print()
+    print("=" * 60)
     print(f"RESULTS: {passed} passed, {failed} failed out of {passed + failed}")
     print("=" * 60)
     return failed == 0

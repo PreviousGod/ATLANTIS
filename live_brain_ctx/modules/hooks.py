@@ -556,7 +556,10 @@ def _record_tool_result(tool_name: str, args: Any, result: Any, session_id: str 
             key_args = ', '.join(f'{k}={v}' for k, v in (args if isinstance(args, dict) else {}).items() if k in ('query', 'path', 'pattern', 'url', 'command'))[:100]
             approach = f"{tool_name}({key_args})" if key_args else tool_name
             error_snippet = (result_text or '')[:150].replace('\n', ' ')
-            record_ruled_out(session_id, approach, error_snippet, db_conn=conn)
+            # Categorise: development noise (patch, file edits) vs reasoning failures
+            dev_tools = {'patch', 'write_file', 'execute_code', 'terminal'}
+            category = "development" if tool_name in dev_tools else "reasoning"
+            record_ruled_out(session_id, approach, error_snippet, db_conn=conn, category=category)
     except Exception:
         try:
             if conn:
@@ -856,6 +859,7 @@ def _post_llm_call(**kwargs):
                 session_id,
                 "skipped_attack_verification",
                 "Tier 3 response missing mandatory ATTACK_COMPLETED marker",
+                category="attack",
             )
         else:
             valid, reason = check_attack_quality(assistant_response)
@@ -864,5 +868,6 @@ def _post_llm_call(**kwargs):
                     session_id,
                     "weak_attack_content",
                     f"ATTACK_COMPLETED present but content failed quality check: {reason}",
+                    category="attack",
                 )
     return None
