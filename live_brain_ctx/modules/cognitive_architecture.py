@@ -40,7 +40,9 @@ REASONING PROTOCOL (mandatory for this response):
 4. <attack> Act as an adversarial critic. Try to DESTROY your own answer:
    - What assumption could be wrong?
    - What edge case breaks it?
-   - Is there a simpler explanation I missed? </attack>
+   - Is there a simpler explanation I missed?
+   - MANDATORY: List at least one concrete flaw OR explicitly state "No critical flaws found — answer is sound."
+   - DO NOT skip this step. DO NOT write generic praise. Be brutal. </attack>
 5. <final> If your answer survives the attack → deliver it.
    If not → state what failed, mark it as ruled_out, and try a different approach that avoids the flaw. </final>"""
 
@@ -53,7 +55,7 @@ You MUST use brain_epistemic(action=search_web) or explicitly state "I don't hav
 # ---------------------------------------------------------------------------
 
 _COMPLEX_SIGNALS = re.compile(
-    r'\b(zašto|why|kako|how|debug|fix|error|ne radi|doesn.t work|fails?|broke|implement|architect|design|compare|analyze|explain why|root cause|difference between|почему|як|чому|как|не работает|не працює|ошибка|помилка)\b',
+    r'\b(zašto|why|kako|how|debug|fix|error|ne radi|doesn.t work|fails?|broke|implement|architect|design|compare|analyze|explain why|root cause|difference between|почему|як|чому|как|не работает|не працює|ошибка|помилка|pregledaj|analiziraj|proveri|popravi|review|examine|inspect|investigate|refactor|optimize|upgrade|enhance|migrate|redesign|objasni|explain|razliku|difference)\b',
     re.IGNORECASE,
 )
 
@@ -68,16 +70,48 @@ def classify_complexity(user_message: str, fact_count: int, ruled_out_count: int
     msg = (user_message or "").strip()
     if not msg or _TRIVIAL_SIGNALS.match(msg) or len(msg) < 15:
         return 1
+    words = msg.split()
+    word_count = len(words)
     complex_matches = len(_COMPLEX_SIGNALS.findall(msg))
-    if complex_matches >= 2 or ruled_out_count > 0 or (complex_matches >= 1 and fact_count == 0):
+    has_multi_part = bool(re.search(r'[,;—•]|\b(i\s+|and\s+|or\s+|ili\s+|ili)\b', msg, re.I))
+    if complex_matches >= 2 or ruled_out_count > 0:
         return 3
-    if complex_matches >= 1 or len(msg) > 100 or fact_count == 0:
+    if (complex_matches >= 1 and fact_count == 0) or (word_count > 25 and fact_count == 0):
+        return 3
+    if complex_matches >= 1 or word_count > 20 or (word_count > 12 and has_multi_part):
         return 2
     return 1
 
 
 # ---------------------------------------------------------------------------
-# Ruled-out state (in-memory, persisted to SQLite in task 4)
+# Fact counting (accurate, not newline proxy)
+# ---------------------------------------------------------------------------
+
+_FACT_SECTIONS = ('KNOWN FACTS', 'VERIFIED ARTIFACTS', 'PROVEN FIX', 'OPEN BUG',
+                  'NEXT REQUIRED ACTION', 'MUST FOLLOW', 'ACTIVE TASK')
+
+
+def _count_facts_in_context(context: str) -> int:
+    """Count actual bullet items in fact-bearing sections."""
+    if not context:
+        return 0
+    count = 0
+    in_section = False
+    for line in context.splitlines():
+        stripped = line.strip()
+        if any(stripped.startswith(s) for s in _FACT_SECTIONS):
+            in_section = True
+            continue
+        if stripped and stripped[0].isupper() and stripped.endswith(':') and not stripped.startswith('- '):
+            in_section = False
+            continue
+        if in_section and stripped.startswith('- '):
+            count += 1
+    return count
+
+
+# ---------------------------------------------------------------------------
+# Ruled-out state (in-memory, persisted to SQLite)
 # ---------------------------------------------------------------------------
 
 _ruled_out_lock = threading.Lock()

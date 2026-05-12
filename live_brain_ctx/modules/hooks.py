@@ -99,7 +99,7 @@ from .query_classification import (
     _is_diagnostic_query,
     _is_approval_query,
 )
-from .cognitive_architecture import get_cognitive_context, record_ruled_out, ensure_ruled_out_table
+from .cognitive_architecture import get_cognitive_context, record_ruled_out, ensure_ruled_out_table, _count_facts_in_context
 
 logger = logging.getLogger(__name__)
 
@@ -744,7 +744,7 @@ def _pre_llm_call_inner(**kwargs):
 
     # --- Cognitive Architecture injection ---
     try:
-        fact_count = context.count('\n') if 'KNOWN FACTS' in context else 0
+        fact_count = _count_facts_in_context(context)
         query_words = [w for w in re.findall(r'[\w./-]+', (user_message or '').lower()) if len(w) > 3]
         conn = _get_connection() if Path(_db_path()).exists() else None
         cognitive_ctx = get_cognitive_context(
