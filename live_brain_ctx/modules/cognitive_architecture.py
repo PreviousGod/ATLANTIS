@@ -44,7 +44,11 @@ REASONING PROTOCOL (mandatory for this response):
    - MANDATORY: List at least one concrete flaw OR explicitly state "No critical flaws found — answer is sound."
    - DO NOT skip this step. DO NOT write generic praise. Be brutal. </attack>
 5. <final> If your answer survives the attack → deliver it.
-   If not → state what failed, mark it as ruled_out, and try a different approach that avoids the flaw. </final>"""
+   If not → state what failed, mark it as ruled_out, and try a different approach that avoids the flaw. </final>
+
+VERIFICATION: After <attack>, your response MUST contain the exact string:
+ATTACK_COMPLETED: followed by at least one sentence summarising the attack result.
+If this string is missing, the system will reject the response and prompt you to retry."""
 
 CONFIDENCE_GATE_MARKER = """\
 ⚠️ RESEARCH REQUIRED: Less than 2 verified facts available for this query.
@@ -55,12 +59,17 @@ You MUST use brain_epistemic(action=search_web) or explicitly state "I don't hav
 # ---------------------------------------------------------------------------
 
 _COMPLEX_SIGNALS = re.compile(
-    r'\b(zašto|why|kako|how|debug|fix|error|ne radi|doesn.t work|fails?|broke|implement|architect|design|compare|analyze|explain why|root cause|difference between|почему|як|чому|как|не работает|не працює|ошибка|помилка|pregledaj|analiziraj|proveri|popravi|review|examine|inspect|investigate|refactor|optimize|upgrade|enhance|migrate|redesign|objasni|explain|razliku|difference)\b',
+    r'\b(zašto|why|kako|how|debug|fix|error|ne radi|doesn.t work|fails?|broke|implement|architect|design|compare|analyze|explain why|root cause|difference between|почему|як|чому|как|не работает|не працює|ошибка|помилка|pregledaj|analiziraj|proveri|popravi|review|examine|inspect|investigate|refactor|optimize|upgrade|enhance|migrate|redesign|objasni|explain|razliku|difference|odradi|uradi|sredi|napravi|build|create|make|write|add|put)\b',
     re.IGNORECASE,
 )
 
 _TRIVIAL_SIGNALS = re.compile(
     r'^(da|ne|ok|hvala|thanks|yes|no|got it|važi|aha|razumem|nastavi|continue|skip|next|да|нет|ні|так|добре|дякую|спасибо|продолжай|далі)\s*[.!?]?$',
+    re.IGNORECASE,
+)
+
+_REFLECTIVE_SIGNALS = re.compile(
+    r'\b(misliš|mislis|šta misliš|šta mislis|kako ti se|cini|oceni|proceni|reci mi|tvoje mišljenje|tvoje misljenje|evaluation|review|assess|thoughts?|opinion|what do you think|how do you feel about|rate|grade|your take)\b',
     re.IGNORECASE,
 )
 
@@ -73,12 +82,19 @@ def classify_complexity(user_message: str, fact_count: int, ruled_out_count: int
     words = msg.split()
     word_count = len(words)
     complex_matches = len(_COMPLEX_SIGNALS.findall(msg))
-    has_multi_part = bool(re.search(r'[,;—•]|\b(i\s+|and\s+|or\s+|ili\s+|ili)\b', msg, re.I))
+    reflective_matches = len(_REFLECTIVE_SIGNALS.findall(msg))
+    has_multi_part = bool(re.search(r'[,;—•]|\d+\.|\b(i\s+|and\s+|or\s+|ili\s+|ili)\b', msg, re.I))
+    # Purely reflective/evaluative queries cap at Tier 2 (verification needed, not full decomposition)
+    if reflective_matches >= 1 and complex_matches < 2:
+        return 2
+    # Tier 3: strongly complex, blocked by prior failures, or substantive with no facts
     if complex_matches >= 2 or ruled_out_count > 0:
         return 3
     if (complex_matches >= 1 and fact_count == 0) or (word_count > 25 and fact_count == 0):
         return 3
-    if complex_matches >= 1 or word_count > 20 or (word_count > 12 and has_multi_part):
+    # Tier 2: some complexity, substantial length, multi-part, or moderately long message
+    if (complex_matches >= 1 or word_count > 20 or (word_count > 12 and has_multi_part)
+            or len(msg) > 40):
         return 2
     return 1
 
@@ -111,6 +127,34 @@ def _count_facts_in_context(context: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Session-tier cache (for post-LLM attack verification)
+# ---------------------------------------------------------------------------
+
+_tier_cache_lock = threading.Lock()
+_session_tier_cache: Dict[str, Tuple[int, float]] = {}
+_TIER_CACHE_TTL = 300  # 5 minutes
+
+
+def get_last_tier(session_id: str) -> int:
+    """Return the tier used in the last pre_llm_call for this session, or 0 if unknown/expired."""
+    if not session_id:
+        return 0
+    with _tier_cache_lock:
+        tier, ts = _session_tier_cache.get(session_id, (0, 0))
+    if time.time() - ts > _TIER_CACHE_TTL:
+        return 0
+    return tier
+
+
+def _set_last_tier(session_id: str, tier: int) -> None:
+    """Record tier for attack verification in post_llm_call."""
+    if not session_id:
+        return
+    with _tier_cache_lock:
+        _session_tier_cache[session_id] = (tier, time.time())
+
+
+# ---------------------------------------------------------------------------
 # Ruled-out state (in-memory, persisted to SQLite)
 # ---------------------------------------------------------------------------
 
@@ -119,6 +163,10 @@ _ruled_out_state: Dict[str, List[Dict[str, Any]]] = {}
 _ruled_out_table_ensured = False
 MAX_RULED_OUT = 5
 
+
+# ---------------------------------------------------------------------------
+# Ruled-out helpers
+# ---------------------------------------------------------------------------
 
 def record_ruled_out(session_id: str, approach: str, reason: str, db_conn: Optional[sqlite3.Connection] = None) -> None:
     """Record a failed approach for constraint propagation."""
@@ -201,6 +249,7 @@ def get_cognitive_context(
     tier = classify_complexity(user_message, fact_count, len(ruled_out))
 
     if tier == 1:
+        _set_last_tier(session_id, 1)
         return ""
 
     parts: List[str] = []
@@ -223,13 +272,72 @@ def get_cognitive_context(
         constraint_lines.append("Any new approach MUST NOT depend on the same assumptions that caused the above failures.")
         parts.append("\n".join(constraint_lines))
 
-    # Cross-domain hints
-    if tier == 3 and db_conn and query_words:
+    # Cross-domain hints (Tier 2+ gets analogies, not just Tier 3)
+    if tier >= 2 and db_conn and query_words:
         hints = _cross_domain_hints(db_conn, query_words, scope_key)
         if hints:
             parts.append("CROSS-DOMAIN ANALOGIES (from other knowledge areas):\n" + "\n".join(hints))
 
+    _set_last_tier(session_id, tier)
     return "COGNITIVE FRAMEWORK\n" + "\n\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Attack content parser (rule-based quality check)
+# ---------------------------------------------------------------------------
+
+_ATTACK_BLOCK_RE = re.compile(r'<attack>(.*?)</attack>', re.DOTALL | re.IGNORECASE)
+
+# Concrete criticism signals — presence of ANY = likely valid attack
+_ATTACK_CRITICISM_SIGNALS = re.compile(
+    r'\b(flaws?|wrong|incorrect|invalid|breaks?|broken|edge case|missed|simpler|assumption|weakness|gap|hole|problems?|issues?|limitation|contradiction|errors?|mistakes?|fails?|failures?|risks?|concerns?|critiques?|criticism|overlooked|naive|fragile|brittle|incomplete|insufficient|unverified|untested|unreliable|bias|skewed)\b',
+    re.IGNORECASE,
+)
+
+# Generic praise / empty attack signals — if ONLY these present = invalid
+_ATTACK_PRAISE_SIGNALS = re.compile(
+    r'\b(good|great|excellent|perfect|sound|solid|valid|correct|strong|robust|well-done|flawless|no issues|no problems|no flaws)\b',
+    re.IGNORECASE,
+)
+
+# Numbered flaws = strong indicator of real attack
+_ATTACK_NUMBERED_FLAW = re.compile(r'(?:flaw|issue|problem)\s*#?\s*\d+', re.IGNORECASE)
+
+
+def check_attack_quality(response: str) -> Tuple[bool, str]:
+    """Parse <attack> block and verify it contains genuine criticism.
+
+    Returns (is_valid, reason).
+    Rule-based: 0 LLM calls.
+    """
+    if not response:
+        return False, "Empty response"
+
+    match = _ATTACK_BLOCK_RE.search(response)
+    if not match:
+        return False, "Missing <attack> block"
+
+    attack_text = match.group(1)
+    if len(attack_text.strip()) < 20:
+        return False, "Attack block too short (< 20 chars)"
+
+    criticism_hits = len(_ATTACK_CRITICISM_SIGNALS.findall(attack_text))
+    praise_hits = len(_ATTACK_PRAISE_SIGNALS.findall(attack_text))
+    numbered_flaws = bool(_ATTACK_NUMBERED_FLAW.search(attack_text))
+
+    # Strong signal: numbered flaws or multiple criticism words
+    if numbered_flaws or criticism_hits >= 2:
+        return True, f"Valid attack: {criticism_hits} criticism signals, numbered_flaws={numbered_flaws}"
+
+    # Weak signal: some criticism but also praise — ambiguous
+    if criticism_hits >= 1 and praise_hits == 0:
+        return True, f"Valid attack: {criticism_hits} criticism signals, no praise"
+
+    # Empty / praise-only attack
+    if criticism_hits == 0 and praise_hits >= 1:
+        return False, f"Praise-only attack: {praise_hits} praise signals, 0 criticism"
+
+    return False, f"No concrete criticism found (crit={criticism_hits}, praise={praise_hits})"
 
 
 # ---------------------------------------------------------------------------

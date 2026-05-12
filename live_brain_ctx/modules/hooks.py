@@ -99,7 +99,7 @@ from .query_classification import (
     _is_diagnostic_query,
     _is_approval_query,
 )
-from .cognitive_architecture import get_cognitive_context, record_ruled_out, ensure_ruled_out_table, _count_facts_in_context
+from .cognitive_architecture import get_cognitive_context, record_ruled_out, ensure_ruled_out_table, _count_facts_in_context, get_last_tier, check_attack_quality
 
 logger = logging.getLogger(__name__)
 
@@ -849,4 +849,20 @@ def _post_llm_call(**kwargs):
         confidence=0.72,
     )
     _record_epistemic_answer_if_source_backed(scope_key, user_message, assistant_response, session_id)
+    # --- Attack verification (Tier 3 enforcement) ---
+    if get_last_tier(session_id) == 3:
+        if 'ATTACK_COMPLETED:' not in assistant_response:
+            record_ruled_out(
+                session_id,
+                "skipped_attack_verification",
+                "Tier 3 response missing mandatory ATTACK_COMPLETED marker",
+            )
+        else:
+            valid, reason = check_attack_quality(assistant_response)
+            if not valid:
+                record_ruled_out(
+                    session_id,
+                    "weak_attack_content",
+                    f"ATTACK_COMPLETED present but content failed quality check: {reason}",
+                )
     return None
