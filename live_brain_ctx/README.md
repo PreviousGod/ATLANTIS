@@ -51,6 +51,46 @@ The exact sections vary by query type; typical contents:
 
 Section budgets configured in `context_config.json`.
 
+## Intent-gated context policy
+
+As of 2026-05-17, context surfacing is intent-gated before sections are added
+to the prompt. This exists to prevent a common failure mode in long-running
+agents: a short greeting, recap question, or file lookup accidentally revives
+stale operational objectives.
+
+The policy buckets are:
+
+| Intent | Purpose | Allowed section families |
+|---|---|---|
+| `chit_chat` | Short greetings / acknowledgements | none |
+| `continuity_recap` | "šta si radio", "where were we" style recap | recap + continuity + facts |
+| `task_execution` | active debugging / coding / fixing | full operational context |
+| `local_repo_lookup` | file/path/repo lookup | artifacts + facts + proven fixes |
+| `approval_flow` | approval / pending proposal queries | approval sections only |
+
+This means:
+
+- greetings no longer reopen `ACTIVE TASK` or `NEXT REQUIRED ACTION`
+- recap prompts do not inherit execution noise unless they explicitly become operational
+- repo/file lookups stay factual instead of reopening stale objectives
+- approval prompts stay narrow and do not drag code/task context into the prompt
+
+## Why this is better than generic memory injection
+
+Many memory systems are good at recall but weak at prompt selection. They can
+store the right information and still inject the wrong context.
+
+`live_brain_ctx` is stronger for operational agents because it:
+
+- gates sections by user intent instead of dumping "top relevant" snippets
+- prefers verified artifacts and active truth over broad semantic similarity
+- keeps casual chat and recap turns cheap, short, and clean
+- logs section acceptance/rejection decisions for debugging and regression tests
+
+That does not make it universally better than every memory product. It makes it
+better for scoped agent execution where the wrong context is worse than missing
+context.
+
 ## Running tests
 
 ```bash
@@ -101,6 +141,11 @@ if present) controls:
   `modules/`. The rest is dead until the full refactor is completed.
 
 ## Changelog
+
+- **2026-05-17** — intent-gated context surfacing:
+  added centralized query intent classification, per-intent section allowlists,
+  per-intent section budgets, and regression coverage for greeting suppression,
+  recap routing, approval-only prompts, repo lookups, and intent conflicts.
 
 - **2026-05-11** — stabilization pass:
   added `tests/test_hook_dispatch.py` (6 tests);

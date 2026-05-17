@@ -35,6 +35,23 @@ ATLANTIS is a complete operational state management system that gives AI agents 
 | **User Alignment** | Automatically tracks preferences, communication patterns, feedback |
 | **Deterministic Retrieval** | Keyword/rule-based scoring with domain conflict detection — no embeddings |
 
+## Why ATLANTIS Is Better For Operational Agents
+
+ATLANTIS is not "better than every memory system" in every use case. It is
+stronger than generic memory stacks when the agent must preserve operational
+truth, stay scoped to the current task, and explain why a context fragment was
+surfaced.
+
+| Generic memory pattern | Common failure mode | ATLANTIS behavior |
+|---|---|---|
+| **Vector / embedding memory** | Semantically similar but operationally wrong recall | Deterministic scope, rules, beliefs, artifacts, and active-task state win before any broad recall |
+| **Chat-history summarizer** | Good recap, weak execution continuity | Stores verified artifacts, open bugs, next required action, approvals, and causal belief state |
+| **Generic RAG memory** | Retrieves text snippets but does not model what is currently true | Tracks mutable operational truth through reality state, belief lifecycle, and audit trail |
+| **Workflow state tracker** | Knows status outside the prompt, but the model still answers from stale context | Injects scoped state directly into the pre-LLM context and records post-turn outcomes back into the DB |
+
+In short: ATLANTIS is optimized for long-running operational agents, not for
+generic semantic search or "remember my conversations" demos.
+
 ## Plugin Structure
 
 ### `live_brain/` — Memory Provider (39 files, ~4500 LOC)
@@ -157,6 +174,17 @@ python live_brain_ctx/tests/test_cross_platform.py
 5. **Platform-agnostic** — scope keys parameterized by platform (telegram/discord/slack/cli/web)
 
 ## Changelog
+
+- **2026-05-17** — intent-gated context injection:
+  - Added intent classification for `chit_chat`, `continuity_recap`,
+    `task_execution`, `local_repo_lookup`, and `approval_flow`
+  - Centralized section allowlists and section budgets in `live_brain_ctx`
+  - Prevented greetings and vague follow-ups from reviving stale operational state
+  - Kept repo/file lookups factual instead of leaking active tasks and next actions
+  - Added regression tests for greeting suppression, recap routing, approval-only
+    prompts, and repo lookup behavior
+  - Extended artifact lookup for manifest-style queries such as `plugin.yaml`
+    and `manifest`
 
 - **2026-05-11** — ATLANTIS Cognitive Architecture:
   - Tiered reasoning (Tier 1/2/3) with zero overhead for trivial queries

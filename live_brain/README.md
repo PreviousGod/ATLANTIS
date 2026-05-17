@@ -53,6 +53,30 @@ LiveBrainProvider              (MemoryProvider entrypoint)
 | `brain_user_profile` | View/update user preferences and patterns |
 | `brain_compose_query` | Algebraic compositional queries (A + B − C) |
 
+## What this provider is optimized for
+
+`live_brain` is strongest when the agent needs durable operational memory, not
+generic semantic recall. The provider favors:
+
+- verified artifacts over filename similarity
+- current operational truth over old chat summaries
+- explicit belief lifecycle over hidden "the model probably remembers"
+- auditable state transitions over opaque retrieval scores
+
+That makes it a better fit than generic memory servers for agents that edit
+code, maintain approvals, track blockers, and need to survive long-running
+multi-session work without drifting.
+
+## Artifact lookup behavior
+
+Artifact resolution is role- and status-driven first. If the query has enough
+project signal, `ArtifactRegistry` resolves verified paths by project key and
+role instead of fuzzy filename matching.
+
+For operational repo questions, the provider also supports manifest-style
+queries such as `plugin.yaml`, `plugin yml`, and `manifest`, so the context
+engine can surface a factual path answer without reopening unrelated tasks.
+
 ## Running tests
 
 ```bash
@@ -144,6 +168,11 @@ Current migrations:
   old name via compatibility alias. Migrate imports when convenient.
 
 ## Changelog
+
+- **2026-05-17** — provider support for intent-gated repo lookups:
+  artifact query detection now recognizes manifest-style prompts like
+  `plugin.yaml` / `plugin yml` / `manifest`, enabling factual artifact
+  resolution for local repo questions without relying on task-state recall.
 
 - **2026-05-11** — production-readiness pass:
   migration 006 FTS5 rewrite (rowid reserved name);
