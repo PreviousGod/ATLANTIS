@@ -67,7 +67,8 @@ def artifact_query_signal(text: str) -> bool:
     lowered = (text or '').lower()
     return any(token in lowered for token in [
         'pošalj', 'posalj', 'send', 'video', 'videa', 'fajl', 'file', 'artifact',
-        'artefakt', 'part', 'deo', 'dio', 'slik', 'image', 'enoch', 'enoh', 'tačni fajlovi', 'tacni fajlovi'
+        'artefakt', 'part', 'deo', 'dio', 'slik', 'image', 'enoch', 'enoh', 'tačni fajlovi', 'tacni fajlovi',
+        'plugin.yaml', 'plugin yml', 'manifest',
     ])
 
 
@@ -256,6 +257,23 @@ class ArtifactRegistry:
             return []
         project = infer_project_key(query_text)
         roles = infer_roles(query_text)
+        lowered = (query_text or '').lower()
+        if not project and ('plugin.yaml' in lowered or 'manifest' in lowered):
+            rows = self.conn.execute(
+                """
+                SELECT project_key, role, label, path, status
+                FROM verified_artifacts
+                WHERE status IN ('verified', 'candidate')
+                  AND lower(path) LIKE '%plugin.yaml%'
+                ORDER BY status='verified' DESC, confidence DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [
+                f"project={row['project_key']} role={row['role']} label={row['label'] or row['role']} path={row['path']} status={row['status']}"
+                for row in rows
+            ]
         if not roles:
             roles = ['part_1', 'part_2', 'combined_or_full']
         if not project:

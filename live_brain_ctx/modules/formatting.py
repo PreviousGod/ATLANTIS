@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from typing import Dict, List, Tuple
+from typing import Dict, List, Set, Tuple
 
 from .state import (
     SECTION_LIMITS,
@@ -51,6 +51,47 @@ _SECRET_RE = SECRET_RE
 _MUSIC_MEMORY_ALIASES = MUSIC_MEMORY_ALIASES
 _SYNTHETIC_MEMORY_RE = SYNTHETIC_MEMORY_RE
 _LOW_SIGNAL_WORDS = LOW_SIGNAL_WORDS
+
+_INTENT_SECTION_ALLOWLIST: Dict[str, Set[str]] = {
+    # Plain chat should stay empty; otherwise every greeting drags old state back in.
+    'chit_chat': set(),
+    # Recap intent needs continuity, not execution noise.
+    'continuity_recap': {
+        'PENDING APPROVAL', 'APPROVAL ROUTING', 'MUST FOLLOW', 'ACTIVE TASK',
+        'CONTINUITY MEMORY', 'RECENT EPISODES', 'KNOWN FACTS', 'LATEST RECAP',
+    },
+    # Execution/debugging can use the full operational context.
+    'task_execution': {
+        'MUST FOLLOW', 'VERIFIED ARTIFACTS',
+        'PROVEN FIX', 'KNOWN FACTS', 'ACTIVE TASK', 'CONTINUITY MEMORY',
+        'RECENT EPISODES', 'OPEN BUG', 'NEXT REQUIRED ACTION', 'DIAGNOSTIC RULE',
+    },
+    # Local repo lookups should stay factual and file-oriented.
+    'local_repo_lookup': {
+        'MUST FOLLOW', 'VERIFIED ARTIFACTS',
+        'PROVEN FIX', 'KNOWN FACTS',
+    },
+    # Approval queries should expose only approval routing plus the minimum blocking context.
+    'approval_flow': {'PENDING APPROVAL', 'APPROVAL ROUTING'},
+}
+
+_INTENT_SECTION_BUDGETS: Dict[str, int] = {
+    'chit_chat': 0,
+    'continuity_recap': 4,
+    'task_execution': 6,
+    'local_repo_lookup': 4,
+    'approval_flow': 2,
+}
+
+
+def allowed_sections_for_intent(intent: str) -> Set[str]:
+    """Single source of truth for section gating by intent."""
+    return set(_INTENT_SECTION_ALLOWLIST.get(intent, _INTENT_SECTION_ALLOWLIST['task_execution']))
+
+
+def section_budget_for_intent(intent: str) -> int:
+    """Keep low-signal intents short even when the database has a lot of matching rows."""
+    return int(_INTENT_SECTION_BUDGETS.get(intent, _INTENT_SECTION_BUDGETS['task_execution']))
 
 
 def _append_section(parts: List[str], title: str, lines: List[str]) -> None:

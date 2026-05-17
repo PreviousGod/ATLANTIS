@@ -21,6 +21,7 @@ class QueryContext:
     """Query metadata extracted from user message."""
     scope_key: str
     query_lower: str
+    intent: str
     query_words: List[str]
     active_tags: Dict[str, List[str]]
     continuation_query: bool
@@ -151,6 +152,12 @@ from .modules.formatting import (  # noqa: E402
     _format_episodes,
     _format_fix_recipes,
     _format_binding_constraints,
+    allowed_sections_for_intent,
+    section_budget_for_intent,
+)
+
+from .modules.query_classification import (  # noqa: E402
+    _classify_query_intent,
 )
 
 from .modules.integrations import (  # noqa: E402

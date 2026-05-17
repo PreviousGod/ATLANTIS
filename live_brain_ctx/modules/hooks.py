@@ -79,6 +79,8 @@ from .formatting import (
     _format_episodes,
     _format_fix_recipes,
     _format_binding_constraints,
+    allowed_sections_for_intent,
+    section_budget_for_intent,
 )
 from .integrations import (
     _load_reality_engine_class,
@@ -95,6 +97,7 @@ from .integrations import (
 from .data_sources import _fetch_all_data_sources, _perform_db_maintenance
 from .text_processing import _truncate_fact, _redact
 from .query_classification import (
+    _classify_query_intent,
     _is_recap_query,
     _is_diagnostic_query,
     _is_approval_query,
@@ -125,6 +128,7 @@ _LOCAL_DEBUG_TOOL_RE = re.compile(
 # ---------------------------------------------------------------------------
 
 _connection_pool = None
+_connection_pool_db_path = None
 
 
 def _hermes_home() -> str:
@@ -137,9 +141,23 @@ def _db_path() -> str:
 
 def _get_connection_pool():
     """Lazy initialization of connection pool."""
-    global _connection_pool
+    global _connection_pool, _connection_pool_db_path
+    current_db_path = _db_path()
+    if (
+        _connection_pool is not None
+        and _connection_pool_db_path
+        and _connection_pool_db_path != current_db_path
+    ):
+        # Tests and multi-home runs swap HERMES_HOME at runtime; stale pooled handles must not follow.
+        try:
+            _connection_pool.close_all()
+        except Exception:
+            pass
+        _connection_pool = None
+        _connection_pool_db_path = None
     if _connection_pool is None and ConnectionPool is not None:
-        _connection_pool = ConnectionPool(_db_path(), max_connections=10)
+        _connection_pool = ConnectionPool(current_db_path, max_connections=10)
+        _connection_pool_db_path = current_db_path
     return _connection_pool
 
 
@@ -217,11 +235,55 @@ def _prepare_query_context(user_message: str, sender_id: str, session_id: str, *
     now = time.time()
     ttl_cutoff = now - _CONSTRAINT_TTL_DAYS * 86400
     query_lower = (user_message or "").lower()
+    intent = _classify_query_intent(user_message or "", chit_chat_patterns=_CHIT_CHAT_PATTERNS)
     continuation_query = _is_continuation_query(user_message or "")
     query_words = [w for w in re.findall(r'[\w./-]+', query_lower) if len(w) > 3]
     active_tags = _active_tags(user_message, scope_key)
-    return QueryContext(scope_key, query_lower, query_words, active_tags,
+    return QueryContext(scope_key, query_lower, intent, query_words, active_tags,
                        continuation_query, now, ttl_cutoff, session_id=session_id)
+
+
+def _section_score(lines: List[str]) -> int:
+    """Cheap score for logs: more surviving lines means the section had stronger support."""
+    return len([line for line in lines if (line or '').strip()])
+
+
+def _log_section_decision(section: str, intent: str, allowed: bool, reason: str, score: int) -> None:
+    logger.debug(
+        "[LIVE_BRAIN_SECTION] section=%s intent=%s allowed=%s reason=%s score=%s",
+        section,
+        intent,
+        allowed,
+        reason,
+        score,
+    )
+
+
+def _try_append_intent_section(
+    parts: List[str],
+    *,
+    section: str,
+    lines: List[str],
+    intent: str,
+    allowed_sections: set[str],
+    section_count: int,
+    section_budget: int,
+    reason: str,
+) -> int:
+    """Central section gate so all prompt surfacing goes through one policy path."""
+    score = _section_score(lines)
+    if not lines:
+        _log_section_decision(section, intent, False, f"{reason}:empty", score)
+        return section_count
+    if section not in allowed_sections:
+        _log_section_decision(section, intent, False, f"{reason}:intent_blocked", score)
+        return section_count
+    if section_budget >= 0 and section_count >= section_budget:
+        _log_section_decision(section, intent, False, f"{reason}:budget_exhausted", score)
+        return section_count
+    _append_section(parts, section, lines)
+    _log_section_decision(section, intent, True, reason, score)
+    return section_count + 1
 
 
 def _load_live_brain_context(user_message: str, session_id: str, sender_id: str) -> str:
@@ -232,72 +294,134 @@ def _load_live_brain_context(user_message: str, session_id: str, sender_id: str)
     approval_query = _is_approval_query(user_message or "")
     if _is_review_only_query(user_message or '') and not approval_query:
         return ""
-    if _is_chit_chat(user_message or "") and not approval_query:
-        if _AUTO_SURFACE_PENDING_APPROVALS:
-            conn = _get_connection()
-            conn.row_factory = sqlite3.Row
-            pending_approval_rows = _fetch_pending_approval_rows(conn)
-            should_surface, surface_reason, rows_to_surface = _should_surface_pending_approvals(conn, pending_approval_rows, user_message, approval_query)
-            if should_surface:
-                _mark_pending_approvals_surfaced(conn, rows_to_surface, surface_reason)
-                parts: List[str] = []
-                _append_section(parts, "PENDING APPROVAL", _approval_context_lines(rows_to_surface, approval_query=False))
-                return "\n\n".join(parts)
-            if pending_approval_rows:
-                parts: List[str] = []
-                _append_section(parts, "APPROVAL ROUTING", _suppressed_approval_reminder_lines())
-                return "\n\n".join(parts)
-        return ""
 
     qctx = _prepare_query_context(user_message, sender_id, session_id)
     _LAST_CONTEXT_METADATA['recipe_ids'] = []
+    allowed_sections = allowed_sections_for_intent(qctx.intent)
+    section_budget = section_budget_for_intent(qctx.intent)
 
     conn = _get_connection()
     conn.row_factory = sqlite3.Row
-    data = _fetch_all_data_sources(conn, qctx, user_message, approval_query)
+    ArtifactRegistry = None
+    try:
+        from live_brain.artifacts import ArtifactRegistry as _ArtifactRegistry
+        ArtifactRegistry = _ArtifactRegistry
+    except Exception:
+        ArtifactRegistry = None
+    data = _fetch_all_data_sources(
+        conn,
+        qctx,
+        user_message,
+        approval_query,
+        ArtifactRegistry=ArtifactRegistry,
+    )
 
     parts: List[str] = []
+    section_count = 0
 
-    # PENDING APPROVAL — surface only when explicit, newly pending, or relevant to this turn.
+    # Approval banners are intent-gated so normal chat does not become an approval inbox.
     if data.should_surface_approval:
-        _append_section(parts, "PENDING APPROVAL", _approval_context_lines(data.pending_approval_rows, approval_query=approval_query))
+        section_count = _try_append_intent_section(
+            parts,
+            section="PENDING APPROVAL",
+            lines=_approval_context_lines(data.pending_approval_rows, approval_query=approval_query),
+            intent=qctx.intent,
+            allowed_sections=allowed_sections,
+            section_count=section_count,
+            section_budget=section_budget,
+            reason=f"approval_surface:{data.approval_surface_reason or 'explicit_or_relevant'}",
+        )
     elif data.pending_approval_rows:
-        _append_section(parts, "APPROVAL ROUTING", _suppressed_approval_reminder_lines())
+        section_count = _try_append_intent_section(
+            parts,
+            section="APPROVAL ROUTING",
+            lines=_suppressed_approval_reminder_lines(),
+            intent=qctx.intent,
+            allowed_sections=allowed_sections,
+            section_count=section_count,
+            section_budget=section_budget,
+            reason="approval_suppressed_repeat",
+        )
 
-    # BINDING CONSTRAINTS — deterministic scope match, TTL enforced
+    # Binding rules survive across intents because they are deterministic safety constraints.
     if data.binding_rules:
         constraints = _format_binding_constraints(data.binding_rules, qctx, user_message)
         if constraints:
-            _append_section(parts, "MUST FOLLOW", constraints)
+            section_count = _try_append_intent_section(
+                parts,
+                section="MUST FOLLOW",
+                lines=constraints,
+                intent=qctx.intent,
+                allowed_sections=allowed_sections,
+                section_count=section_count,
+                section_budget=section_budget,
+                reason="binding_constraints",
+            )
 
-    # VERIFIED ARTIFACTS — deterministic project file choices before fuzzy episodes/search.
+    # Verified artifacts are valuable only when the intent is file/repo or execution-oriented.
     try:
         if data.artifact_lines:
-            _append_section(parts, "VERIFIED ARTIFACTS", data.artifact_lines)
+            section_count = _try_append_intent_section(
+                parts,
+                section="VERIFIED ARTIFACTS",
+                lines=data.artifact_lines,
+                intent=qctx.intent,
+                allowed_sections=allowed_sections,
+                section_count=section_count,
+                section_budget=section_budget,
+                reason="artifact_registry_match",
+            )
     except Exception:
         pass
 
-    # FIX RECIPES / CAUSAL ACTIVATIONS — proven tool approaches
+    # Proven fixes stay out of recap/chat unless the intent is explicitly operational.
     recipe_hints, selected_recipe_ids = _format_fix_recipes(data.recipe_rows, data.causal_rows, qctx)
     if recipe_hints:
         _LAST_CONTEXT_METADATA['recipe_ids'] = selected_recipe_ids[:_SECTION_LIMITS.get('PROVEN FIX', 3)]
-        _append_section(parts, "PROVEN FIX", recipe_hints)
+        section_count = _try_append_intent_section(
+            parts,
+            section="PROVEN FIX",
+            lines=recipe_hints,
+            intent=qctx.intent,
+            allowed_sections=allowed_sections,
+            section_count=section_count,
+            section_budget=section_budget,
+            reason="verified_recipe_or_causal_match",
+        )
 
-    # LEARNED PRINCIPLES — useful facts, not free-form fixes
+    # Facts are allowed broadly, but still pass through the central budget gate.
     if data.knowledge_rows:
         principles = [_truncate_fact(r[0]) for r in data.knowledge_rows if r[0] and not _SECRET_RE.search(r[0]) and not _is_noisy_memory(r[0]) and not _domain_conflicts(qctx.query_lower, r[0]) and _has_overlap(r, qctx.query_words, ['principle_text'])]
         if principles:
-            _append_section(parts, "KNOWN FACTS", principles)
+            section_count = _try_append_intent_section(
+                parts,
+                section="KNOWN FACTS",
+                lines=principles,
+                intent=qctx.intent,
+                allowed_sections=allowed_sections,
+                section_count=section_count,
+                section_budget=section_budget,
+                reason="knowledge_overlap",
+            )
 
-    # ACTIVE WORK ITEM
-    if data.work_item_row and not _is_recap_query(user_message or ""):
+    # Active task is no longer a default; only execution/recap intents get it.
+    if data.work_item_row and qctx.intent in {'task_execution', 'continuity_recap'}:
         lines = [f"Task: {data.work_item_row['title']}"]
         if data.work_item_row['status']:
             lines.append(f"Status: {data.work_item_row['status']}")
         root_cause = (data.work_item_row['root_cause'] or '').strip()
         if root_cause and root_cause not in {'.', '-', 'unknown'} and len(root_cause) > 3 and not _marker_conflicts(qctx.query_lower, root_cause.lower()):
             lines.append(f"Root cause: {_truncate_fact(root_cause)}")
-        _append_section(parts, "ACTIVE TASK", ["; ".join(lines)])
+        section_count = _try_append_intent_section(
+            parts,
+            section="ACTIVE TASK",
+            lines=["; ".join(lines)],
+            intent=qctx.intent,
+            allowed_sections=allowed_sections,
+            section_count=section_count,
+            section_budget=section_budget,
+            reason="active_work_item",
+        )
 
     if qctx.continuation_query and data.continuity_work_rows:
         continuity_lines = []
@@ -307,39 +431,93 @@ def _load_live_brain_context(user_message: str, session_id: str, sender_id: str)
                 continue
             continuity_lines.append(f"User previously said: {_truncate_fact(title)}")
         if continuity_lines:
-            _append_section(parts, "CONTINUITY MEMORY", continuity_lines)
+            section_count = _try_append_intent_section(
+                parts,
+                section="CONTINUITY MEMORY",
+                lines=continuity_lines,
+                intent=qctx.intent,
+                allowed_sections=allowed_sections,
+                section_count=section_count,
+                section_budget=section_budget,
+                reason="continuity_match",
+            )
 
-    # ACTIVE EPISODES — max 3, 1 line each, no chit-chat.
+    # Recent episodes are helpful for recap/execution but too noisy for casual chat.
     ep_lines = _format_episodes(data.episode_rows, qctx, user_message)
     if ep_lines:
-        _append_section(parts, "RECENT EPISODES", ep_lines)
+        section_count = _try_append_intent_section(
+            parts,
+            section="RECENT EPISODES",
+            lines=ep_lines,
+            intent=qctx.intent,
+            allowed_sections=allowed_sections,
+            section_count=section_count,
+            section_budget=section_budget,
+            reason="episode_overlap",
+        )
 
-    # VALIDATED FACTS — atomic, max 200 chars
+    # Atomic facts stay useful for repo lookup and execution, but still obey intent budget.
     if data.fact_rows:
         facts = [_truncate_fact(r['fact_text']) for r in data.fact_rows if r['fact_text'] and not _SECRET_RE.search(r['fact_text']) and not _is_noisy_memory(r['fact_text']) and not _is_question_like_memory(r['fact_text']) and not _domain_conflicts(qctx.query_lower, r['fact_text']) and _visible_fact_matches(r['fact_text'], qctx.query_words) and _matches(r, qctx.active_tags, qctx.scope_key) and _has_overlap(r, qctx.query_words, ['fact_text'])]
         if facts:
-            _append_section(parts, "KNOWN FACTS", facts)
+            section_count = _try_append_intent_section(
+                parts,
+                section="KNOWN FACTS",
+                lines=facts,
+                intent=qctx.intent,
+                allowed_sections=allowed_sections,
+                section_count=section_count,
+                section_budget=section_budget,
+                reason="fact_overlap",
+            )
 
-    # OPEN HYPOTHESES — only if there's a real signal
+    # Open bugs are reserved for operational intents so recap/chat stays factual.
     open_beliefs = [r['claim_text'] for r in data.belief_rows if r['status'] == 'open' and len(r['claim_text']) > 20 and not _is_noisy_memory(r['claim_text']) and _matches(r, qctx.active_tags, qctx.scope_key) and _has_overlap(r, qctx.query_words, ['claim_text'])]
     if open_beliefs:
-        _append_section(parts, "OPEN BUG", [_truncate_fact(b) for b in open_beliefs[:2]])
+        section_count = _try_append_intent_section(
+            parts,
+            section="OPEN BUG",
+            lines=[_truncate_fact(b) for b in open_beliefs[:2]],
+            intent=qctx.intent,
+            allowed_sections=allowed_sections,
+            section_count=section_count,
+            section_budget=section_budget,
+            reason="open_belief_overlap",
+        )
 
-    # VALIDATED CAUSES — facts only; PROVEN FIX is reserved for executable recipes
+    # Validated causes get merged into facts to avoid yet another section family.
     validated_causes = [r['claim_text'] for r in data.belief_rows if r['status'] == 'validated' and r['belief_kind'] == 'validated_cause' and not _is_noisy_memory(r['claim_text']) and _matches(r, qctx.active_tags, qctx.scope_key) and _has_overlap(r, qctx.query_words, ['claim_text'])]
     if validated_causes:
-        _append_section(parts, "KNOWN FACTS", [f"Cause: {_truncate_fact(c)}" for c in validated_causes[:2]])
+        section_count = _try_append_intent_section(
+            parts,
+            section="KNOWN FACTS",
+            lines=[f"Cause: {_truncate_fact(c)}" for c in validated_causes[:2]],
+            intent=qctx.intent,
+            allowed_sections=allowed_sections,
+            section_count=section_count,
+            section_budget=section_budget,
+            reason="validated_cause_overlap",
+        )
 
-    # NEXT BEST ACTIONS — only if there's a real signal (not "answer user")
+    # Next action is useful only when the user is in task mode, not when they ask for recap or files.
     if data.work_item_row and data.work_item_row['next_step']:
         next_step = data.work_item_row['next_step']
         generic_next = ['diagnose the problem using exact entities', 'before guessing', 'answer the user']
         lowered_next = next_step.lower()
         if next_step and 'continue' not in lowered_next and 'answer' not in lowered_next and not any(token in lowered_next for token in generic_next):
-            _append_section(parts, "NEXT REQUIRED ACTION", [next_step[:200]])
+            section_count = _try_append_intent_section(
+                parts,
+                section="NEXT REQUIRED ACTION",
+                lines=[next_step[:200]],
+                intent=qctx.intent,
+                allowed_sections=allowed_sections,
+                section_count=section_count,
+                section_budget=section_budget,
+                reason="work_item_next_step",
+            )
 
-    # RECAP — only for recap queries
-    if _is_recap_query(user_message or "") and data.recap_row and not any(_is_noisy_memory(data.recap_row[field] or '') for field in ['task', 'root_cause', 'current_status', 'next_step']):
+    # Recap block is isolated so "šta si radio danas" does not drag in full execution context.
+    if qctx.intent == 'continuity_recap' and data.recap_row and not any(_is_noisy_memory(data.recap_row[field] or '') for field in ['task', 'root_cause', 'current_status', 'next_step']):
         recap_lines = []
         if data.recap_row['task']:
             recap_lines.append(f"Task: {data.recap_row['task'][:80]}")
@@ -350,11 +528,29 @@ def _load_live_brain_context(user_message: str, session_id: str, sender_id: str)
         if data.recap_row['next_step']:
             recap_lines.append(f"Next: {data.recap_row['next_step'][:100]}")
         if recap_lines:
-            parts.append("LATEST RECAP:\n- " + "\n- ".join(recap_lines))
+            section_count = _try_append_intent_section(
+                parts,
+                section="LATEST RECAP",
+                lines=recap_lines,
+                intent=qctx.intent,
+                allowed_sections=allowed_sections,
+                section_count=section_count,
+                section_budget=section_budget,
+                reason="canonical_recap",
+            )
 
-    # DIAGNOSTIC GUIDANCE — only for diagnostic queries
+    # Diagnostic rule is tiny but still gated centrally so repo/recap/chat prompts stay clean.
     if _is_diagnostic_query(user_message or ""):
-        parts.append("DIAGNOSTIC RULE: Do not present hypotheses as confirmed causes. Give one concrete next debugging step if evidence is insufficient.")
+        section_count = _try_append_intent_section(
+            parts,
+            section="DIAGNOSTIC RULE",
+            lines=["Do not present hypotheses as confirmed causes. Give one concrete next debugging step if evidence is insufficient."],
+            intent=qctx.intent,
+            allowed_sections=allowed_sections,
+            section_count=section_count,
+            section_budget=section_budget,
+            reason="diagnostic_guardrail",
+        )
 
     if not parts:
         logger.debug(f"[LIVE_BRAIN_CONTEXT] No context generated for query: {user_message[:50]}")
@@ -371,9 +567,11 @@ def _debug_live_brain_context(user_message: str, session_id: str = '', sender_id
     query_lower = (user_message or '').lower()
     query_words = [w for w in re.findall(r'[\w./-]+', query_lower) if len(w) > 3]
     active_tags = _active_tags(user_message, scope_key)
+    intent = _classify_query_intent(user_message or '', chit_chat_patterns=_CHIT_CHAT_PATTERNS)
     context = _load_live_brain_context(user_message, session_id, sender_id)
     debug: Dict[str, Any] = {
         'scope_key': scope_key,
+        'intent': intent,
         'active_tags': active_tags,
         'context': context,
         'line_count': len(context.splitlines()) if context else 0,
@@ -414,35 +612,39 @@ def _debug_live_brain_context(user_message: str, session_id: str = '', sender_id
     causal_words = _meaningful_query_words(query_words) or query_words
     if causal_words:
         fts_query = ' OR '.join(causal_words[:6])
-        recipe_rows = conn.execute(
-            """SELECT r.recipe_id, r.problem_pattern, r.tool_name, r.steps_json, r.args_template_json,
-               r.success_criteria, r.artifact_verified, r.promotion_status, r.confidence, r.times_confirmed, r.scope_tags_json
-               FROM fix_recipes r
-               JOIN fix_recipes_fts fts ON r.recipe_id = fts.recipe_id
-               WHERE fts.problem_pattern MATCH ? AND r.scope_key=? AND r.status='active'
-               AND r.promotion_status='active' AND r.artifact_verified=1
-               ORDER BY r.confidence DESC, r.times_confirmed DESC LIMIT 50""",
-            (fts_query, scope_key),
-        ).fetchall()
-        for row in recipe_rows:
-            if not _causal_matches(row, active_tags, scope_key):
-                debug['rejections']['recipes_scope'] += 1
-            elif not _tool_relevant(row['tool_name'], active_tags, query_lower):
-                debug['rejections']['recipes_tool'] += 1
-        rows = conn.execute(
-            """SELECT c.tool_used, c.trigger_pattern, c.args_template_json, c.test_result,
-               c.artifact_verified, c.times_confirmed, c.confidence, c.scope_tags_json
-               FROM causal_activations c
-               JOIN causal_activations_fts fts ON c.rowid = fts.rowid
-               WHERE fts.trigger_text MATCH ? AND c.scope_key=? AND c.success=1
-               ORDER BY c.times_confirmed DESC LIMIT 50""",
-            (fts_query, scope_key),
-        ).fetchall()
-        for row in rows:
-            if not _causal_matches(row, active_tags, scope_key):
-                debug['rejections']['causal_scope'] += 1
-            elif not _tool_relevant(row['tool_used'], active_tags, query_lower):
-                debug['rejections']['causal_tool'] += 1
+        try:
+            recipe_rows = conn.execute(
+                """SELECT r.recipe_id, r.problem_pattern, r.tool_name, r.steps_json, r.args_template_json,
+                   r.success_criteria, r.artifact_verified, r.promotion_status, r.confidence, r.times_confirmed, r.scope_tags_json
+                   FROM fix_recipes r
+                   JOIN fix_recipes_fts fts ON r.recipe_id = fts.recipe_id
+                   WHERE fts.problem_pattern MATCH ? AND r.scope_key=? AND r.status='active'
+                   AND r.promotion_status='active' AND r.artifact_verified=1
+                   ORDER BY r.confidence DESC, r.times_confirmed DESC LIMIT 50""",
+                (fts_query, scope_key),
+            ).fetchall()
+            for row in recipe_rows:
+                if not _causal_matches(row, active_tags, scope_key):
+                    debug['rejections']['recipes_scope'] += 1
+                elif not _tool_relevant(row['tool_name'], active_tags, query_lower):
+                    debug['rejections']['recipes_tool'] += 1
+            rows = conn.execute(
+                """SELECT c.tool_used, c.trigger_pattern, c.args_template_json, c.test_result,
+                   c.artifact_verified, c.times_confirmed, c.confidence, c.scope_tags_json
+                   FROM causal_activations c
+                   JOIN causal_activations_fts fts ON c.rowid = fts.rowid
+                   WHERE fts.trigger_text MATCH ? AND c.scope_key=? AND c.success=1
+                   ORDER BY c.times_confirmed DESC LIMIT 50""",
+                (fts_query, scope_key),
+            ).fetchall()
+            for row in rows:
+                if not _causal_matches(row, active_tags, scope_key):
+                    debug['rejections']['causal_scope'] += 1
+                elif not _tool_relevant(row['tool_used'], active_tags, query_lower):
+                    debug['rejections']['causal_tool'] += 1
+        except sqlite3.OperationalError:
+            # Debug mode should stay readable even when the raw query tokens are not valid FTS syntax.
+            debug['rejections']['recipes_tool'] += 0
     return debug
 
 

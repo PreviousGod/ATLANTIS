@@ -15,6 +15,7 @@ monolith into a thin facade + per-concern modules is tracked as a follow-up.
 
 # Query classification functions actually consumed by the monolith.
 from .query_classification import (
+    _classify_query_intent,
     _is_recap_query,
     _is_diagnostic_query,
     _is_approval_query,
@@ -40,6 +41,7 @@ from . import state  # noqa: F401
 
 __all__ = [
     # query_classification
+    '_classify_query_intent',
     '_is_recap_query',
     '_is_diagnostic_query',
     '_is_approval_query',

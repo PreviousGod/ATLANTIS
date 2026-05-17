@@ -116,12 +116,8 @@ def test_pending_approval_is_visible_in_context() -> None:
                 os.environ.pop('HERMES_HOME', None)
             else:
                 os.environ['HERMES_HOME'] = old_home
-        assert 'PENDING APPROVAL' in automatic_context
-        assert result['proposal_id'] in automatic_context
-        assert 'without waiting for the user to ask' in automatic_context
-        assert 'APPROVAL ROUTING' in repeated_chitchat_context
-        assert 'Do NOT mention' in repeated_chitchat_context
-        assert 'PENDING APPROVAL' not in repeated_chitchat_context
+        assert automatic_context == ''
+        assert repeated_chitchat_context == ''
         assert 'PENDING APPROVAL' in relevant_context
         assert result['proposal_id'] in relevant_context
         assert 'PENDING APPROVAL' in explicit_context

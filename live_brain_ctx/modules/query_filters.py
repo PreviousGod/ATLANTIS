@@ -47,10 +47,8 @@ def _is_non_action_work_item_text(text: str) -> bool:
 
 
 def _is_local_stack_query(text: str) -> bool:
-    lowered = (text or "").lower()
-    return any(t in lowered for t in [
-        "telegram", "vision", "image", "analyzer", "gateway", "ffmpeg", "plugin", "memory",
-    ])
+    from .query_classification import _is_local_stack_query as _module_is_local_stack_query
+    return _module_is_local_stack_query(text)
 
 
 def _is_chit_chat(text: str) -> bool:
