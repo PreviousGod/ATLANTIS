@@ -229,6 +229,10 @@ def register(ctx) -> None:
     ctx.register_hook("pre_tool_call", _pre_tool_call)
     ctx.register_hook("post_tool_call", _post_tool_call)
     ctx.register_hook("post_llm_call", _post_llm_call)
+    # P2.5 — memory block compression. Wraps core MemoryStore so the
+    # frozen system-prompt snapshot collapses near-duplicate entries.
+    from .modules.memory_compress import install as _install_memory_compress
+    _install_memory_compress()
 
 
 # ---------------------------------------------------------------------------

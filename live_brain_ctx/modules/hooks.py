@@ -656,6 +656,17 @@ def _latest_tool_context(conn: sqlite3.Connection, session_id: str, created_at: 
         ).fetchone()
         if row:
             return str(row[0] or ''), str(row[1] or '')
+        # Fallback: same session, but the user has been idle longer than the
+        # 30-min window. Without this, post-tool hooks resolve scope_key to the
+        # session_id itself, while the send_message gate (which has no time
+        # cutoff) still resolves to the platform scope — leaving
+        # pending_verifications rows un-satisfiable across long idle periods.
+        row = conn.execute(
+            "SELECT scope_key, query_text FROM context_impressions WHERE session_id=? ORDER BY created_at DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if row:
+            return str(row[0] or ''), str(row[1] or '')
     row = conn.execute(
         "SELECT scope_key, query_text FROM context_impressions WHERE created_at >= ? ORDER BY created_at DESC LIMIT 1",
         (created_at - 300,),
