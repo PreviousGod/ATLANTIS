@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 
 from .query_filters import _is_chit_chat, _is_review_only_query
 from .query_classification import _is_approval_query
+from .text_processing import redact_for_storage
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,7 @@ def _record_reality_event(scope_key: str, event_type: str, subject: str, payload
             scope_key=scope_key or session_id or 'global',
             event_type=event_type,
             subject=subject,
-            payload=payload,
+            payload=redact_for_storage(payload),
             session_id=session_id,
             source=source,
             confidence=confidence,
@@ -233,6 +234,65 @@ def _epistemic_job_sources(conn: sqlite3.Connection, scope_key: str, job_id: str
     return [dict(row) for row in rows]
 
 
+def _fresh_fact_sources(plan: Dict[str, Any], *, limit: int = 4, required_domain: str = '') -> List[Dict[str, Any]]:
+    sources: List[Dict[str, Any]] = []
+    seen = set()
+    required_domain = required_domain.lower().removeprefix('www.')
+    for fact in list((plan or {}).get('fresh_facts') or []):
+        urls = []
+        raw_urls = fact.get('source_urls') if isinstance(fact, dict) else []
+        if isinstance(raw_urls, list):
+            urls.extend(str(url or '') for url in raw_urls)
+        raw_json = fact.get('source_urls_json') if isinstance(fact, dict) else ''
+        if raw_json and not urls:
+            try:
+                decoded = json.loads(raw_json)
+                if isinstance(decoded, list):
+                    urls.extend(str(url or '') for url in decoded)
+            except Exception:
+                pass
+        for url in urls:
+            url = str(url or '').strip()
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            host = urlparse(url).netloc.lower().removeprefix('www.')
+            if required_domain and not (host == required_domain or host.endswith('.' + required_domain)):
+                continue
+            sources.append({
+                'source_id': str(fact.get('fact_id') or '') if isinstance(fact, dict) else '',
+                'url': url,
+                'title': host or url,
+                'summary': str(fact.get('fact_text') or '')[:400] if isinstance(fact, dict) else '',
+                'authority': str(fact.get('authority') or 'official') if isinstance(fact, dict) else 'official',
+                'confidence': float(fact.get('confidence') or 0.78) if isinstance(fact, dict) else 0.78,
+                'created_at': float(fact.get('updated_at') or time.time()) if isinstance(fact, dict) else time.time(),
+            })
+            if len(sources) >= limit:
+                return sources
+    return sources
+
+
+def _record_sources_from_fresh_facts(manager: Any, scope_key: str, job_id: str, question: str, fact_sources: List[Dict[str, Any]]) -> None:
+    for source in fact_sources[:4]:
+        url = str(source.get('url') or '').strip()
+        if not url:
+            continue
+        try:
+            manager.record_source(
+                scope_key=scope_key or 'global',
+                job_id=job_id,
+                url=url,
+                title=str(source.get('title') or '')[:300],
+                source_kind='epistemic_cached_fact_source',
+                summary=str(source.get('summary') or '')[:1200],
+                confidence=float(source.get('confidence') or 0.78),
+                question=question,
+            )
+        except Exception:
+            continue
+
+
 def _format_autonomous_research_context(search_result: Dict[str, Any], sources: List[Dict[str, Any]]) -> str:
     lines = [
         'AUTONOMOUS WEB RESEARCH:',
@@ -253,6 +313,7 @@ def _format_autonomous_research_context(search_result: Dict[str, Any], sources: 
     status = str(search_result.get('status') or '')
     if status and status != 'sources_found':
         lines.append(f'- Research status: {status}; do not answer from stale memory or secondary-only evidence.')
+    lines.append('- Answer format rule: do not output XML/planning tags; answer in plain text with raw source URL strings.')
     lines.append('- Safe rule: answer only from listed official/primary sources; if evidence is insufficient, call web_extract/web_search; do not answer from stale memory.')
     lines.append('- Evidence rule: if pages are discovered but not extracted, cite the URLs and say exact current values require the CME page/bulletin; do not invent numeric or contract-specific limits.')
     lines.append('- Persistence rule: after the final answer, Live Brain records source-backed facts automatically.')
@@ -272,6 +333,15 @@ def _load_epistemic_autonomous_context(scope_key: str, user_message: str, sessio
         EpistemicManager = _load_epistemic_manager_class()
         manager = EpistemicManager(conn, session_id=session_id, scope_key=scope_key or 'global')
         plan = manager.plan_if_needed(scope_key or 'global', user_message or '', session_id=session_id)
+        if not plan.get('needs_research') and plan.get('fresh_facts'):
+            job_id = str(plan.get('job_id') or manager.latest_job(scope_key or 'global', user_message or ''))
+            if not job_id:
+                job_id = f"cached_fact:{abs(hash((scope_key or 'global', user_message or ''))) & 0xffffffff:x}"
+            required_domain = 'cmegroup.com' if 'cmegroup.com' in (user_message or '').lower() else ''
+            fact_sources = _fresh_fact_sources(plan, limit=4, required_domain=required_domain)
+            if fact_sources:
+                _record_sources_from_fresh_facts(manager, scope_key or 'global', job_id, user_message or '', fact_sources)
+                return _format_autonomous_research_context({'status': 'sources_found', 'job_id': job_id, 'discovery': 'fresh_fact_sources'}, fact_sources)
         if not plan.get('needs_research'):
             return ''
         job_id = str(plan.get('job_id') or manager.latest_job(scope_key or 'global', user_message or ''))
@@ -361,6 +431,8 @@ def _should_load_reality_brief(user_message: str) -> bool:
     lowered = (user_message or '').strip().lower()
     if not lowered:
         return False
+    if 'live_brain_capability_e2e continue run-' in lowered or 'live_brain_capability_e2e inference-check run-' in lowered:
+        return False
     if lowered in {'ok', 'da', 'ne', 'hmm', 'hm'}:
         return False
     if lowered in {'to', 'ovo', 'taj', 'ta', 'uradi to', 'a link', 'a link?'}:
@@ -372,7 +444,7 @@ def _should_isolate_epistemic_context(user_message: str) -> bool:
     lowered = (user_message or '').strip().lower()
     if not lowered or _is_chit_chat(lowered):
         return False
-    if 'live_brain_capability_e2e research' in lowered:
+    if 'live_brain_capability_e2e research' in lowered or 'full_stress_e2e research' in lowered:
         return True
     current_terms = (
         'latest', 'current', 'today', 'now', 'najnovij', 'aktueln', 'trenutn',
@@ -394,6 +466,7 @@ def _should_isolate_epistemic_context(user_message: str) -> bool:
 def _epistemic_query_text(user_message: str) -> str:
     text = user_message or ''
     text = re.sub(r'\bLIVE_BRAIN_CAPABILITY_E2E\s+research\s+run[-_][a-z0-9]+\s*:\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bFULL_STRESS_E2E\s+research\s+run[-_][a-z0-9]+\s*:\s*', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\brun[-_][a-z0-9]+\b', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\bcodename[-_][a-z0-9]+\b', '', text, flags=re.IGNORECASE)
     return re.sub(r'\s+', ' ', text).strip() or (user_message or '')

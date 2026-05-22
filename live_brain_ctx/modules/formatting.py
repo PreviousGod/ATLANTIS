@@ -57,19 +57,21 @@ _INTENT_SECTION_ALLOWLIST: Dict[str, Set[str]] = {
     'chit_chat': set(),
     # Recap intent needs continuity, not execution noise.
     'continuity_recap': {
-        'PENDING APPROVAL', 'APPROVAL ROUTING', 'MUST FOLLOW', 'ACTIVE TASK',
-        'CONTINUITY MEMORY', 'RECENT EPISODES', 'KNOWN FACTS', 'LATEST RECAP',
+        'MUST FOLLOW', 'ACTIVE TASK', 'CONTINUITY MEMORY', 'RECENT EPISODES',
+        'KNOWN FACTS', 'LATEST RECAP', 'ACTIVE OBJECTIVES', 'AUTHORED THIS SESSION',
     },
     # Execution/debugging can use the full operational context.
     'task_execution': {
-        'MUST FOLLOW', 'VERIFIED ARTIFACTS',
-        'PROVEN FIX', 'KNOWN FACTS', 'ACTIVE TASK', 'CONTINUITY MEMORY',
-        'RECENT EPISODES', 'OPEN BUG', 'NEXT REQUIRED ACTION', 'DIAGNOSTIC RULE',
+        'MUST FOLLOW', 'VERIFIED ARTIFACTS', 'PROVEN FIX', 'KNOWN FACTS',
+        'ACTIVE TASK', 'CONTINUITY MEMORY', 'RECENT EPISODES', 'OPEN BUG',
+        'NEXT REQUIRED ACTION', 'DIAGNOSTIC RULE', 'ACTIVE OBJECTIVES',
+        'INFRASTRUCTURE', 'AUTHORED THIS SESSION', 'VERIFICATION REQUIRED',
+        'RECALLED FIX', 'FILE KNOWLEDGE', 'UNVERIFIED CLAIM', 'RECENT RISK ACTIVITY',
     },
     # Local repo lookups should stay factual and file-oriented.
     'local_repo_lookup': {
-        'MUST FOLLOW', 'VERIFIED ARTIFACTS',
-        'PROVEN FIX', 'KNOWN FACTS',
+        'MUST FOLLOW', 'VERIFIED ARTIFACTS', 'PROVEN FIX', 'KNOWN FACTS',
+        'INFRASTRUCTURE', 'AUTHORED THIS SESSION', 'FILE KNOWLEDGE',
     },
     # Approval queries should expose only approval routing plus the minimum blocking context.
     'approval_flow': {'PENDING APPROVAL', 'APPROVAL ROUTING'},
@@ -78,8 +80,8 @@ _INTENT_SECTION_ALLOWLIST: Dict[str, Set[str]] = {
 _INTENT_SECTION_BUDGETS: Dict[str, int] = {
     'chit_chat': 0,
     'continuity_recap': 4,
-    'task_execution': 6,
-    'local_repo_lookup': 4,
+    'task_execution': 7,
+    'local_repo_lookup': 5,
     'approval_flow': 2,
 }
 

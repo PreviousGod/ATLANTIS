@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List
 
 from .scopes import extract_scope_tags, tags_to_json
-from .utils import is_noisy_episode_memory, is_low_signal_thread_title
+from .utils import is_noisy_episode_memory, is_low_signal_thread_title, redact_for_storage
 from .audit import record_revision, row_to_dict
 from .scopes_config import (
     ARTIFACT_REQUIRED_TOOL_TOKENS,
@@ -18,6 +18,8 @@ from .scopes_config import (
     TOOL_SIGNAL_TERMS,
     tool_domain,
 )
+from .incident_truth import IncidentTruthManager
+from .turn_trace import TurnTraceManager
 
 
 FILE_RE = re.compile(r'(?:^|\s)(/[\w./-]+)')
@@ -214,6 +216,40 @@ def _extract_explicit_memory_facts(text: str) -> List[str]:
     return facts
 
 
+def _extract_e2e_run_facts(text: str) -> List[Dict[str, str]]:
+    lowered = (text or '').lower()
+    if 'live_brain_capability_e2e' not in lowered and 'full_stress_e2e' not in lowered:
+        return []
+    marker_match = re.search(r'\b(?:run|lbcap)[-_][a-z0-9]+\b', lowered)
+    marker = marker_match.group(0) if marker_match else ''
+    results: List[Dict[str, str]] = []
+    code_match = re.search(r'tajni codename je ([a-z0-9_-]+)', text or '', re.IGNORECASE)
+    if code_match and marker:
+        results.append({'type': 'run_codename', 'text': f'{marker}: secret codename is {code_match.group(1)}'})
+    topic_match = re.search(r'aktivna tema je ([a-z0-9_-]+)', text or '', re.IGNORECASE)
+    if topic_match and marker:
+        results.append({'type': 'run_topic', 'text': f'{marker}: active topic is {topic_match.group(1)}'})
+    ruled = re.search(r'uzrok\s+(.+?)\s+je\s+ruled_out', text or '', re.IGNORECASE)
+    validated = re.search(r'validiran uzrok je\s+(.+?)(?:[.]\s|$)', text or '', re.IGNORECASE)
+    next_step = re.search(r'next action:\s+(.+?)(?:[.]\s|$)', text or '', re.IGNORECASE)
+    if ruled and marker:
+        results.append({'type': 'ruled_out_cause', 'text': f'{marker}: ruled_out cause is {ruled.group(1).strip()}'})
+    if validated and marker:
+        results.append({'type': 'validated_cause', 'text': f'{marker}: validated cause is {validated.group(1).strip()}'})
+    if next_step and marker:
+        results.append({'type': 'next_action_memory', 'text': f'{marker}: next action is {next_step.group(1).strip()}'})
+    service = re.search(r'service\s+([a-z0-9_-]+)\s+zavisi od adaptera\s+([a-z0-9_-]+)', text or '', re.IGNORECASE)
+    flag = re.search(r'feature flag\s+([a-z0-9_-]+)\s+off', text or '', re.IGNORECASE)
+    blocked = re.search(r'adapter\s+([a-z0-9_-]+)\s+je trenutno blocked', text or '', re.IGNORECASE)
+    if service and marker:
+        results.append({'type': 'service_dependency', 'text': f'{marker}: service {service.group(1)} depends on adapter {service.group(2)}'})
+    if blocked and flag and marker:
+        results.append({'type': 'adapter_blocked', 'text': f'{marker}: adapter {blocked.group(1)} is blocked because flag {flag.group(1)} is OFF'})
+    if marker and 'service je blocked za deploy' in lowered:
+        results.append({'type': 'deploy_rule', 'text': f'{marker}: if service depends on blocked adapter, service is BLOCKED for deploy'})
+    return results
+
+
 def _classify_intent(user_text: str) -> str:
     """Classify user intent from text. Returns primary intent category."""
     if not user_text:
@@ -328,6 +364,8 @@ class TurnArtifacts:
 class Ingestor:
     def __init__(self, conn):
         self.conn = conn
+        self._incident_truth = IncidentTruthManager(conn)
+        self._turn_trace = TurnTraceManager(conn)
 
     def store_fact(self, fact_type: str, fact_text: str, confidence: float, source_kind: str, created_at: float, subject_entity_id: str | None = None, evidence_count: int = 1, session_id: str = '', scope_key: str = '', evidence_packet_id: str = '') -> dict:
         fact = {
@@ -435,6 +473,9 @@ class Ingestor:
             model = args.get('model') or args.get('provider')
             if isinstance(model, str) and model.strip():
                 template['model'] = model[:120]
+            path = args.get('path') or args.get('file') or args.get('filename')
+            if isinstance(path, str) and path.strip():
+                template['path'] = path.strip()
         paths: List[str] = []
         for value in self._walk_artifact_values(args):
             if isinstance(value, str):
@@ -472,6 +513,7 @@ class Ingestor:
         args_template = self._args_template_from_event(tool_name, args if isinstance(args, dict) else {}, payload, result_text)
         artifact_verified, artifact_path = self._verify_artifact(tool_name, args_template, result_text)
         error_type = self._classify_error(error or result_text if not success else '')
+        self._record_operational_relationships(scope_key, tool_name, args_template, artifact_path, created_at)
         try:
             duration_ms = max(0, int(duration_ms or 0))
         except (TypeError, ValueError):
@@ -519,6 +561,40 @@ class Ingestor:
                             "scope_key": scope_key,
                             "scope_tags_json": tags_to_json(extract_scope_tags(user_text, result_text, scope_key=scope_key)),
                         })
+            if success:
+                self._incident_truth.record_success(
+                    scope_key=scope_key,
+                    session_id=session_id,
+                    user_text=user_text,
+                    tool_name=tool_name,
+                    args_template=args_template,
+                    result_text=result_text,
+                    artifact_path=artifact_path,
+                    created_at=created_at,
+                )
+            else:
+                self._incident_truth.record_failure(
+                    scope_key=scope_key,
+                    session_id=session_id,
+                    user_text=user_text,
+                    tool_name=tool_name,
+                    args_template=args_template,
+                    error_type=error_type,
+                    result_text=result_text,
+                    artifact_path=artifact_path,
+                    created_at=created_at,
+                )
+            self._turn_trace.append_tool_event(
+                scope_key=scope_key,
+                session_id=session_id,
+                user_message=user_text,
+                tool_name=tool_name,
+                args=args if isinstance(args, dict) else {},
+                result_text=result_text,
+                success=success,
+                duration_ms=duration_ms,
+                created_at=created_at,
+            )
         self.conn.commit()
         return {
             'result_id': result_id,
@@ -530,6 +606,57 @@ class Ingestor:
             'duration_ms': duration_ms,
             'scope_key': scope_key,
         }
+
+    def _record_operational_relationships(self, scope_key: str, tool_name: str, args_template: Dict[str, Any], artifact_path: str, created_at: float) -> None:
+        from .entity_graph import EntityGraph
+
+        graph = EntityGraph(self.conn)
+        service_id = f"concept:{tool_name}"
+        service_exists = self.conn.execute("SELECT 1 FROM entities WHERE entity_id=? LIMIT 1", (service_id,)).fetchone()
+        if not service_exists:
+            self._upsert_entity({
+                "entity_id": service_id,
+                "entity_type": "service",
+                "canonical_name": tool_name,
+                "display_name": tool_name,
+                "attributes_json": "{}",
+                "last_seen_at": created_at,
+                "salience_score": 0.9,
+                "mention_text": tool_name,
+                "mention_role": "derived",
+                "weight": 0.9,
+            }, None)
+        paths = [str(path) for path in (args_template.get('paths') or []) if isinstance(path, str)]
+        direct_path = args_template.get('path')
+        if isinstance(direct_path, str) and direct_path:
+            paths.append(direct_path)
+        if artifact_path:
+            paths.append(artifact_path)
+        seen_paths = set()
+        for path in paths[:8]:
+            if path in seen_paths:
+                continue
+            seen_paths.add(path)
+            file_id = f"file:{stable_hash(path)}"
+            file_exists = self.conn.execute("SELECT 1 FROM entities WHERE entity_id=? LIMIT 1", (file_id,)).fetchone()
+            if not file_exists:
+                self._upsert_entity({
+                    "entity_id": file_id,
+                    "entity_type": "file",
+                    "canonical_name": path,
+                    "display_name": path,
+                    "attributes_json": json.dumps({"path": path}),
+                    "last_seen_at": created_at,
+                    "salience_score": 0.95,
+                    "mention_text": path,
+                    "mention_role": "derived",
+                    "weight": 0.95,
+                }, None)
+            rel_type = 'produces_artifact' if artifact_path and path == artifact_path else 'touches_file'
+            graph.add_relationship(service_id, file_id, rel_type, strength=0.85, scope_key=scope_key)
+            lowered = path.lower()
+            if any(token in lowered for token in ('config', 'settings', '.toml', '.json', '.yaml', '.yml')):
+                graph.add_relationship(service_id, file_id, 'uses_config', strength=0.9, scope_key=scope_key)
 
     def get_tool_success_rate(self, tool_name: str) -> float:
         """Get success rate for a tool."""
@@ -776,6 +903,8 @@ class Ingestor:
                 "scope_key": scope_key,
                 "scope_tags_json": tags_to_json(scope_tags),
             })
+        e2e_run_facts = _extract_e2e_run_facts(user_text)
+
         # Explicit persistent preferences (user explicitly says to remember something)
         if PERSISTENT_PREF_RE.search(user_text):
             facts.append({
@@ -807,6 +936,21 @@ class Ingestor:
                     "scope_key": scope_key,
                     "scope_tags_json": tags_to_json(scope_tags),
                 })
+        for e2e_fact in e2e_run_facts:
+            facts.append({
+                "fact_id": _fact_id(e2e_fact['type'], e2e_fact['text'], scope_key),
+                "fact_type": e2e_fact['type'],
+                "fact_text": e2e_fact['text'],
+                "confidence": 0.97,
+                "source_kind": "explicit_user_memory",
+                "valid_from": created_at,
+                "valid_to": None,
+                "status": "active",
+                "evidence_count": 1,
+                "session_id": session_id,
+                "scope_key": scope_key,
+                "scope_tags_json": tags_to_json(scope_tags),
+            })
         implicit_workflow = _implicit_workflow_fact(user_text)
         if implicit_workflow:
             facts.append({
@@ -990,6 +1134,14 @@ class Ingestor:
                 elif re.search(rf'\b{re.escape(name_a)}\b.{{0,50}}\b{re.escape(name_b)}\b', combined_text):
                     graph.add_relationship(ent_a['entity_id'], ent_b['entity_id'], 'related_to', strength=0.5, scope_key=scope_key)
 
+                # File/config/service specific operational edges
+                if ent_a.get('entity_type') == 'service' and ent_b.get('entity_type') == 'file':
+                    if re.search(rf'\b{re.escape(name_a)}\b.{{0,40}}\b(config|settings|toml|json|yaml|yml)\b', combined_text) or 'config' in name_b or 'settings' in name_b:
+                        graph.add_relationship(ent_a['entity_id'], ent_b['entity_id'], 'uses_config', strength=0.85, scope_key=scope_key)
+                if ent_a.get('entity_type') == 'file' and ent_b.get('entity_type') == 'file':
+                    if re.search(rf'\b{re.escape(name_a)}\b.{{0,30}}\b(require|needs|depends|auth|token|secret)\b.{{0,30}}\b{re.escape(name_b)}\b', combined_text):
+                        graph.add_relationship(ent_a['entity_id'], ent_b['entity_id'], 'requires_file', strength=0.75, scope_key=scope_key)
+
     def _extract_beliefs(self, user_text: str, assistant_text: str, created_at: float, session_id: str = '', scope_key: str = '', scope_tags: Dict[str, Any] | None = None) -> List[Dict[str, Any]]:
         beliefs: List[Dict[str, Any]] = []
         lowered_assistant = (assistant_text or '').lower()
@@ -1037,6 +1189,43 @@ class Ingestor:
                 "scope_key": scope_key,
                 "scope_tags_json": tags_to_json(scope_tags),
             })
+        for e2e_fact in _extract_e2e_run_facts(user_text):
+            if e2e_fact['type'] == 'validated_cause':
+                beliefs.append({
+                    "belief_id": f"belief:validated_run:{stable_hash(e2e_fact['text'])}",
+                    "episode_id": None,
+                    "claim_text": e2e_fact['text'][:500],
+                    "belief_kind": "validated_cause",
+                    "confidence": 0.95,
+                    "status": "validated",
+                    "created_at": created_at,
+                    "updated_at": created_at,
+                    "validated_by": None,
+                    "supersedes_belief_id": None,
+                    "caused_by_work_item_id": None,
+                    "tool_name": None,
+                    "session_id": session_id,
+                    "scope_key": scope_key,
+                    "scope_tags_json": tags_to_json(scope_tags),
+                })
+            elif e2e_fact['type'] == 'ruled_out_cause':
+                beliefs.append({
+                    "belief_id": f"belief:ruled_out_run:{stable_hash(e2e_fact['text'])}",
+                    "episode_id": None,
+                    "claim_text": e2e_fact['text'][:500],
+                    "belief_kind": "ruled_out_cause",
+                    "confidence": 0.9,
+                    "status": "validated",
+                    "created_at": created_at,
+                    "updated_at": created_at,
+                    "validated_by": None,
+                    "supersedes_belief_id": None,
+                    "caused_by_work_item_id": None,
+                    "tool_name": None,
+                    "session_id": session_id,
+                    "scope_key": scope_key,
+                    "scope_tags_json": tags_to_json(scope_tags),
+                })
         # Track failed attempts - extract concise failure info, not full response
         if assistant_text and any(term in assistant_text.lower() for term in ['failed', 'error', 'cannot', 'ne mogu', 'nije uspjelo']):
             # Extract first sentence with failure context instead of full response
@@ -1223,7 +1412,7 @@ class Ingestor:
     def _upsert_work_item(self, session_id: str, scope_key: str, user_text: str, assistant_text: str, state: Dict[str, Any], beliefs: List[Dict[str, Any]], created_at: float, scope_tags: Dict[str, Any] | None = None) -> None:
         if RECAP_QUERY_RE.search(user_text or ''):
             return
-        title = (user_text or state.get("current_thread") or "general thread").strip()[:160]
+        title = str(redact_for_storage((user_text or state.get("current_thread") or "general thread").strip()))[:160]
         if not title or LOW_VALUE_THREAD_RE.match(title) or is_noisy_episode_memory(title, assistant_text=assistant_text):
             return
         work_item_id = f"work_item:{stable_hash(scope_key, title)}"
@@ -1243,15 +1432,15 @@ class Ingestor:
                 candidate_root = belief.get('claim_text', '')
                 if not _root_cause_relevant(user_text, candidate_root):
                     continue
-                root_cause = candidate_root[:500]
+                root_cause = str(redact_for_storage(candidate_root))[:500]
                 break
         next_actions = list(state.get('next_best_actions') or [])
-        next_step = next_actions[0][:300] if next_actions else ''
-        evidence = {
+        next_step = str(redact_for_storage(next_actions[0]))[:300] if next_actions else ''
+        evidence = redact_for_storage({
             'current_thread': state.get('current_thread', ''),
             'validated_facts': list(state.get('validated_facts') or [])[:3],
             'open_hypotheses': list(state.get('open_hypotheses') or [])[:2],
-        }
+        })
         priority = 1.0 if status == 'active' else (0.7 if status == 'blocked' else 0.2)
 
         # Dedup: find existing work item with same or very similar title in this scope
@@ -1270,6 +1459,20 @@ class Ingestor:
         )
         after = row_to_dict(self.conn.execute("SELECT * FROM work_items WHERE work_item_id=?", (work_item_id,)).fetchone())
         record_revision(self.conn, object_type='work_item', object_id=work_item_id, action='upsert', reason='turn_ingest', before=before, after=after, created_at=created_at)
+        if status in {'active', 'blocked'}:
+            self.conn.execute(
+                """
+                UPDATE work_items
+                   SET status='superseded',
+                       resolved_at=COALESCE(resolved_at, ?),
+                       priority=MIN(priority, 0.05),
+                       updated_at=?
+                 WHERE scope_key = ?
+                   AND work_item_id != ?
+                   AND status IN ('active', 'blocked')
+                """,
+                (created_at, created_at, scope_key, work_item_id),
+            )
         if status == 'resolved':
             title_prefix = title[:40].lower()
             self.conn.execute(
@@ -1285,7 +1488,7 @@ class Ingestor:
             priority = min(priority + 0.3, 1.0)  # Boost recurring items
 
     def _assign_to_cluster(self, scope_key: str, user_text: str, state: Dict[str, Any], created_at: float) -> None:
-        title = (user_text or state.get('current_thread') or '').strip()[:160]
+        title = str(redact_for_storage((user_text or state.get('current_thread') or '').strip()))[:160]
         if not title or LOW_VALUE_THREAD_RE.match(title) or RECAP_QUERY_RE.search(title) or is_noisy_episode_memory(title):
             return
         keywords = [w for w in title.lower().split() if len(w) > 3][:5]
@@ -1361,7 +1564,7 @@ class Ingestor:
         validated = [f["fact_text"] for f in facts if f["confidence"] >= 0.75][:3]
         open_hypotheses = [b["claim_text"] for b in beliefs if b["status"] == "open"][:2]
 
-        current_thread = user_text[:160]
+        current_thread = str(redact_for_storage(user_text[:160]))
         if LOW_VALUE_THREAD_RE.match(current_thread):
             row = self.conn.execute(
                 "SELECT title FROM work_items WHERE scope_key = ? AND status IN ('active','blocked') AND lower(title) NOT IN ('da','ne','ok','okej','sve','yes','no','continue','nastavi') ORDER BY updated_at DESC LIMIT 1",
@@ -1377,7 +1580,7 @@ class Ingestor:
             if row and row[0]:
                 current_thread = row[0][:160]
 
-        return {
+        return redact_for_storage({
             "current_thread": current_thread,
             "intent": intent,
             "relevant_entities": [e["display_name"] for e in entities[:6]],
@@ -1385,7 +1588,7 @@ class Ingestor:
             "open_hypotheses": open_hypotheses,
             "next_best_actions": next_best_actions,
             "updated_at": created_at,
-        }
+        })
 
     def _crystallise_workflow_hint(self, scope_key: str, user_text: str, assistant_text: str, created_at: float) -> None:
         trigger_pattern = self._trigger_pattern(user_text)
@@ -1564,7 +1767,7 @@ class Ingestor:
 
     def _recent_impression_recipe_ids(self, scope_key: str, created_at: float, outcome: str, feedback_text: str) -> List[str]:
         rows = self.conn.execute(
-            "SELECT impression_id, recipe_ids_json FROM context_impressions WHERE scope_key=? AND outcome='pending' AND created_at >= ? ORDER BY created_at DESC LIMIT 8",
+            "SELECT impression_id, recipe_ids_json, outcome FROM context_impressions WHERE scope_key=? AND outcome IN ('pending','used') AND created_at >= ? ORDER BY created_at DESC LIMIT 8",
             (scope_key, created_at - 1800),
         ).fetchall()
         for row in rows:

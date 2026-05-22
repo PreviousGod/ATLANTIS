@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any, List
+
+from .audit import ensure_schema as ensure_audit_schema, record_revision, row_to_dict
+from .epistemic import EpistemicManager
+from .utils import stable_id, redact_for_storage, redact_json_text
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +54,7 @@ class MaintenanceManager:
             'expired_rules': 0,
             'expired_epistemic_facts': 0,
             'expired_self_evolution_proposals': 0,
+            'scrubbed_sensitive_rows': 0,
             'recipe_ageing': {},
             'recipe_archiving': {},
         }
@@ -109,6 +115,7 @@ class MaintenanceManager:
                 e2e_seed_hours=e2e_seed_pending_hours,
             )
             summary['expired_self_evolution_proposals'] = len(proposal_rows)
+            summary['scrubbed_sensitive_rows'] = self.scrub_sensitive_session_text(dry_run=True)['rows']
 
             summary['recipe_ageing'] = self.age_stale_recipes(dry_run=True)
             summary['recipe_archiving'] = self.archive_stale_review_recipes(dry_run=True)
@@ -168,6 +175,7 @@ class MaintenanceManager:
                     commit=False,
                 )
                 summary['expired_self_evolution_proposals'] = proposal_expiry['expired']
+                summary['scrubbed_sensitive_rows'] = self.scrub_sensitive_session_text(dry_run=False, now=started_at)['rows']
 
                 summary['recipe_ageing'] = self.age_stale_recipes(dry_run=False)
                 summary['recipe_archiving'] = self.archive_stale_review_recipes(dry_run=False)
@@ -261,6 +269,72 @@ class MaintenanceManager:
             except Exception:
                 logger.exception("[live_brain] failed to record init maintenance error")
             raise
+
+    def scrub_sensitive_session_text(self, *, dry_run: bool = True, now: float | None = None) -> dict[str, Any]:
+        """Redact secrets from persisted session/context text. Idempotent."""
+        started_at = float(now or time.time())
+        candidates: list[tuple[str, str, str, str]] = []
+
+        for row in self.conn.execute("SELECT scope_key, state_json FROM work_state").fetchall():
+            current = row['state_json'] or ''
+            redacted = redact_json_text(current)
+            if redacted != current:
+                candidates.append(('work_state', row['scope_key'], current, redacted))
+
+        for row in self.conn.execute("SELECT work_item_id, title, evidence_json FROM work_items").fetchall():
+            title = row['title'] or ''
+            evidence_json = row['evidence_json'] or ''
+            redacted_title = str(redact_for_storage(title))
+            redacted_evidence = redact_json_text(evidence_json)
+            if redacted_title != title:
+                candidates.append(('work_items.title', row['work_item_id'], title, redacted_title))
+            if redacted_evidence != evidence_json:
+                candidates.append(('work_items.evidence_json', row['work_item_id'], evidence_json, redacted_evidence))
+
+        for row in self.conn.execute("SELECT event_id, payload_json FROM reality_events").fetchall():
+            current = row['payload_json'] or ''
+            redacted = redact_json_text(current)
+            if redacted != current:
+                candidates.append(('reality_events', row['event_id'], current, redacted))
+
+        for row in self.conn.execute("SELECT impression_id, query_text FROM context_impressions").fetchall():
+            current = row['query_text'] or ''
+            redacted = str(redact_for_storage(current))
+            if redacted != current:
+                candidates.append(('context_impressions', row['impression_id'], current, redacted))
+
+        if dry_run:
+            return {'rows': len(candidates), 'status': 'dry_run'}
+
+        for target, identifier, before_value, after_value in candidates:
+            if target == 'work_state':
+                before = row_to_dict(self.conn.execute("SELECT * FROM work_state WHERE scope_key=?", (identifier,)).fetchone())
+                self.conn.execute("UPDATE work_state SET state_json=?, updated_at=? WHERE scope_key=?", (after_value, started_at, identifier))
+                after = row_to_dict(self.conn.execute("SELECT * FROM work_state WHERE scope_key=?", (identifier,)).fetchone())
+                record_revision(self.conn, object_type='work_state', object_id=identifier, action='redact', reason='scrub_sensitive_session_text', before=before, after=after, created_at=started_at)
+            elif target == 'work_items.title':
+                before = row_to_dict(self.conn.execute("SELECT * FROM work_items WHERE work_item_id=?", (identifier,)).fetchone())
+                self.conn.execute("UPDATE work_items SET title=?, updated_at=? WHERE work_item_id=?", (after_value, started_at, identifier))
+                after = row_to_dict(self.conn.execute("SELECT * FROM work_items WHERE work_item_id=?", (identifier,)).fetchone())
+                record_revision(self.conn, object_type='work_item', object_id=identifier, action='redact', reason='scrub_sensitive_session_text', before=before, after=after, created_at=started_at)
+            elif target == 'work_items.evidence_json':
+                before = row_to_dict(self.conn.execute("SELECT * FROM work_items WHERE work_item_id=?", (identifier,)).fetchone())
+                self.conn.execute("UPDATE work_items SET evidence_json=?, updated_at=? WHERE work_item_id=?", (after_value, started_at, identifier))
+                after = row_to_dict(self.conn.execute("SELECT * FROM work_items WHERE work_item_id=?", (identifier,)).fetchone())
+                record_revision(self.conn, object_type='work_item', object_id=identifier, action='redact', reason='scrub_sensitive_session_text', before=before, after=after, created_at=started_at)
+            elif target == 'reality_events':
+                before = row_to_dict(self.conn.execute("SELECT * FROM reality_events WHERE event_id=?", (identifier,)).fetchone())
+                self.conn.execute("UPDATE reality_events SET payload_json=? WHERE event_id=?", (after_value, identifier))
+                after = row_to_dict(self.conn.execute("SELECT * FROM reality_events WHERE event_id=?", (identifier,)).fetchone())
+                record_revision(self.conn, object_type='reality_event', object_id=identifier, action='redact', reason='scrub_sensitive_session_text', before=before, after=after, created_at=started_at)
+            elif target == 'context_impressions':
+                before = row_to_dict(self.conn.execute("SELECT * FROM context_impressions WHERE impression_id=?", (identifier,)).fetchone())
+                self.conn.execute("UPDATE context_impressions SET query_text=?, updated_at=? WHERE impression_id=?", (after_value, started_at, identifier))
+                after = row_to_dict(self.conn.execute("SELECT * FROM context_impressions WHERE impression_id=?", (identifier,)).fetchone())
+                record_revision(self.conn, object_type='context_impression', object_id=identifier, action='redact', reason='scrub_sensitive_session_text', before=before, after=after, created_at=started_at)
+
+        self.conn.commit()
+        return {'rows': len(candidates), 'status': 'ok'}
 
     def compile_epistemic_brief(self, scope_key: str, query: str = '', *, max_facts: int = 4) -> str:
         return EpistemicManager(self.conn).compile_brief(scope_key, query, max_facts=max_facts)
@@ -388,4 +462,3 @@ class MaintenanceManager:
         if deleted:
             self.conn.commit()
         return deleted
-

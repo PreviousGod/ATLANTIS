@@ -361,6 +361,8 @@ def _brief_text_relevant(text: str, query: str, signals: set[str], followup: boo
         return False
     if _marker_conflicts(query or '', text or ''):
         return False
+    if _marker_tokens(query or '') and not _marker_tokens(text or ''):
+        return False
     if followup:
         return True
     lowered = text.lower()

@@ -70,7 +70,7 @@ def _fetch_all_data_sources(conn, qctx, user_message, approval_query,
 
     # Facts
     fact_rows = conn.execute(
-        "SELECT DISTINCT fact_text, source_kind, scope_tags_json, scope_key, valid_from FROM facts WHERE status='active' AND confidence >= 0.75 AND NOT (source_kind LIKE 'epistemic:%' AND source_kind NOT IN ('epistemic:official','epistemic:primary_or_institutional','epistemic:primary_or_support')) ORDER BY CASE WHEN scope_key=? THEN 0 ELSE 1 END, valid_from DESC LIMIT 120",
+        "SELECT DISTINCT fact_text, fact_type, source_kind, scope_tags_json, scope_key, valid_from FROM facts WHERE status='active' AND confidence >= 0.75 AND NOT (source_kind LIKE 'epistemic:%' AND source_kind NOT IN ('epistemic:official','epistemic:primary_or_institutional','epistemic:primary_or_support')) ORDER BY CASE WHEN scope_key=? THEN 0 ELSE 1 END, valid_from DESC LIMIT 120",
         (qctx.scope_key,),
     ).fetchall()
 
@@ -233,4 +233,16 @@ def _perform_db_maintenance(conn: sqlite3.Connection, now: float) -> None:
         "ORDER BY updated_at DESC LIMIT ?)",
         (now, MAX_ACTIVE_EPISODES),
     )
+    # Pillar 2 stale pruning: pending verifications older than 24h get marked
+    # 'stale' so the VERIFICATION REQUIRED block stops nagging on abandoned work.
+    # Idempotent; the table is created by migration 007 — guarded so missing
+    # table on first boot doesn't break maintenance.
+    try:
+        conn.execute(
+            "UPDATE pending_verifications SET status='stale' "
+            "WHERE status='pending' AND created_at < ?",
+            (now - 86400,),
+        )
+    except sqlite3.OperationalError:
+        pass  # table not yet created — migration 007 will land on next restart
     conn.commit()

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+from typing import Any
 
 
 LOW_SIGNAL_THREAD_TITLES = {
@@ -26,6 +28,12 @@ _TEST_MEMORY_RE = re.compile(
 
 _META_FIX_RE = re.compile(
     r'\b(memory|plugin|live\s*brain|episode|context|skill|approval|debug|database|db|sql|terminal|research_jobs)\b',
+    re.IGNORECASE,
+)
+
+SECRET_RE = re.compile(
+    r'\b(?:sk-[A-Za-z0-9_-]{12,}|sk-or-v1-[A-Za-z0-9_-]{12,}|'
+    r'[A-Za-z0-9_]*(?:api[_-]?key|token|secret|password|passwd|bearer)[A-Za-z0-9_]*\s*[:=]\s*\S+)',
     re.IGNORECASE,
 )
 
@@ -80,3 +88,28 @@ def is_noisy_episode_memory(title: str, summary: str = '', user_text: str = '', 
 def sql_placeholders(count: int) -> str:
     """Generate SQL placeholders for parameterized queries."""
     return ','.join('?' for _ in range(count))
+
+
+def redact_text(text: str) -> str:
+    text = SECRET_RE.sub('[REDACTED_SECRET]', text or '')
+    return re.sub(r'\bAPI\s*key\w*\b', 'credential', text, flags=re.IGNORECASE)
+
+
+def redact_for_storage(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, list):
+        return [redact_for_storage(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): redact_for_storage(item) for key, item in value.items()}
+    return value
+
+
+def redact_json_text(raw: str) -> str:
+    if not raw:
+        return raw
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return redact_text(raw)
+    return json.dumps(redact_for_storage(parsed), ensure_ascii=False, sort_keys=True)

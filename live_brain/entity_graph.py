@@ -140,6 +140,63 @@ class EntityGraph:
         traverse(entity_id, 1)
         return results
 
+    def resolve_operational_query(
+        self,
+        query_text: str,
+        *,
+        max_depth: int = 2,
+        max_matches: int = 8,
+    ) -> Dict[str, Any]:
+        """Resolve coding/debugging queries via graph traversal before fuzzy recall."""
+        tokens = [token for token in query_text.lower().split() if len(token) > 3]
+        if not tokens:
+            return {'matched_entities': [], 'relationships': [], 'summary_lines': []}
+        matched_entities = []
+        seen_entity_ids = set()
+        for token in tokens[:6]:
+            rows = self.conn.execute(
+                "SELECT entity_id, canonical_name, entity_type FROM entities WHERE lower(canonical_name) LIKE ? ORDER BY salience_score DESC, last_seen_at DESC LIMIT 5",
+                (f"%{token}%",),
+            ).fetchall()
+            for row in rows:
+                if row[0] in seen_entity_ids:
+                    continue
+                seen_entity_ids.add(row[0])
+                matched_entities.append({
+                    'entity_id': row[0],
+                    'canonical_name': row[1],
+                    'entity_type': row[2],
+                })
+                if len(matched_entities) >= max_matches:
+                    break
+            if len(matched_entities) >= max_matches:
+                break
+
+        relationships = []
+        summary_lines = []
+        for entity in matched_entities[:4]:
+            related = self.get_related_entities(entity['entity_id'], max_depth=max_depth)
+            for rel in related[:4]:
+                relationships.append({
+                    'source': entity['canonical_name'],
+                    'relationship_type': rel['relationship_type'],
+                    'target': rel['canonical_name'],
+                    'strength': rel['strength'],
+                    'depth': rel['depth'],
+                })
+            if related:
+                strongest = sorted(related, key=lambda item: item['strength'], reverse=True)[:3]
+                summary_lines.append(
+                    f"{entity['canonical_name']} -> " + ' | '.join(
+                        f"{item['relationship_type']}:{item['canonical_name']}" for item in strongest
+                    )
+                )
+        return {
+            'matched_entities': matched_entities,
+            'relationships': relationships,
+            'summary_lines': summary_lines,
+        }
+
     def synthesize_entity_context(
         self,
         entity_id: str,

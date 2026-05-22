@@ -22,6 +22,7 @@ class QueryContext:
     scope_key: str
     query_lower: str
     intent: str
+    turn_lane: str
     query_words: List[str]
     active_tags: Dict[str, List[str]]
     continuation_query: bool
@@ -229,6 +230,10 @@ def register(ctx) -> None:
     ctx.register_hook("pre_tool_call", _pre_tool_call)
     ctx.register_hook("post_tool_call", _post_tool_call)
     ctx.register_hook("post_llm_call", _post_llm_call)
+    # P5.1 — provider-cache observability + stable-prefix drift guard.
+    from .modules.cache_hints import on_pre_api_request, on_post_api_request
+    ctx.register_hook("pre_api_request", on_pre_api_request)
+    ctx.register_hook("post_api_request", on_post_api_request)
     # P2.5 — memory block compression. Wraps core MemoryStore so the
     # frozen system-prompt snapshot collapses near-duplicate entries.
     from .modules.memory_compress import install as _install_memory_compress
