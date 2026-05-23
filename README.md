@@ -83,11 +83,11 @@ live_brain/
 └── requirements.txt      (ddgs, tiktoken)
 ```
 
-### `live_brain_ctx/` — Context Engine (18 files, ~3200 LOC)
+### `live_brain_ctx/` — Context Engine (21 files, ~4100 LOC)
 
 ```
 live_brain_ctx/
-├── __init__.py           (235 lines — thin facade + register)
+├── __init__.py           (~240 lines — thin facade + register)
 ├── modules/
 │   ├── cognitive_architecture.py (tiered reasoning + ruled_out + cross-domain)
 │   ├── state.py          (constants + regex patterns)
@@ -101,8 +101,12 @@ live_brain_ctx/
 │   ├── tool_context.py   (tool hints + recipe formatting)
 │   ├── tag_matching.py   (scope tag matching)
 │   ├── text_processing.py (redaction + noise detection)
-│   └── query_classification.py
-├── tests/                (3 test files, 27 assertions)
+│   ├── query_classification.py
+│   ├── assembler.py      (P2.1/P4.2 lane-aware byte-budget assembler)
+│   ├── bridge.py         (P3.2 cross-plugin shared state — scopes + pending_changes)
+│   └── memory_compress.py (P2.5 MemoryStore snapshot dedup, containment-ratio single-link)
+├── tests/                (6 test files including golden snapshots)
+│   └── golden/           (6 lane snapshots for drift detection)
 └── context_config.json
 ```
 

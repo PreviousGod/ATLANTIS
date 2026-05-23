@@ -10,13 +10,16 @@ import time
 from pathlib import Path
 from typing import Any, List
 from .scopes_config import TOOL_SIGNAL_TERMS
-from .utils import is_noisy_episode_memory, stable_id
+from .utils import is_noisy_episode_memory, stable_id, redact_for_storage, redact_json_text
 from .reality import RealityEngine, SCHEMA_SQL
 from .epistemic import EpistemicManager
 from .audit import ensure_schema as ensure_audit_schema, record_evidence_packet, record_memory_event, record_revision, row_to_dict
 from .schema_manager import SchemaManager
 from .maintenance_manager import MaintenanceManager
 from .backup_manager import BackupManager
+from .incident_truth import IncidentTruthManager
+from .turn_trace import TurnTraceManager
+from .memory_compiler import MemoryCompiler, ensure_memory_v2_schema
 
 
 logger = logging.getLogger(__name__)
@@ -138,6 +141,7 @@ class LiveBrainStore:
         # tracking columns to them.
         self._run_migrations()
         ensure_audit_schema(self.conn)
+        ensure_memory_v2_schema(self.conn)
 
         # Historical note: this block used to contain ~15 _add_column_if_missing
         # calls for additive schema evolution. Those columns are now included in
@@ -154,9 +158,42 @@ class LiveBrainStore:
         )
 
         self.conn.commit()
+        self.incident_truth_mgr = IncidentTruthManager(self.conn)
+        self.turn_trace_mgr = TurnTraceManager(self.conn)
+        self.memory_compiler = MemoryCompiler(self.conn)
 
     def record_memory_event(self, **kwargs: Any) -> str:
         return record_memory_event(self.conn, **kwargs)
+
+    def record_event(self, event_type: str, payload: dict | None = None, session_id: str = '', scope_key: str = '', **kwargs: Any) -> str:
+        return MemoryCompiler(self.conn).record_event(
+            event_type,
+            payload or {},
+            session_id=session_id,
+            scope_key=scope_key,
+            **kwargs,
+        )
+
+    def compile_events(self, scope_key: str, session_id: str, event_ids: List[str]) -> list[str]:
+        return MemoryCompiler(self.conn).compile_events(scope_key, session_id, event_ids)
+
+    def transition_task(self, task_id: str, new_status: str, reason_event_id: str = '', reason: str = '') -> bool:
+        return MemoryCompiler(self.conn).transition_task(task_id, new_status, reason_event_id, reason)
+
+    def select_active_task(self, scope_key: str, lane: str, query_tags: List[str], now: float | None = None) -> str | None:
+        return MemoryCompiler(self.conn).select_active_task(scope_key, lane, query_tags, now=now)
+
+    def backfill_memory_objects(self, scope_key: str = '', limit: int = 400) -> dict:
+        return MemoryCompiler(self.conn).backfill_compiled_objects(scope_key=scope_key, limit=limit)
+
+    def cleanup_memory_architecture_v2(self, *, dry_run: bool = True, now: float | None = None) -> dict:
+        return MemoryCompiler(self.conn).cleanup_backfill(dry_run=dry_run, now=now)
+
+    def get_nucleus_feed(self, scope_key: str = '', limit: int = 50, min_confidence: float = 0.75) -> list[dict]:
+        return MemoryCompiler(self.conn).get_nucleus_feed(scope_key=scope_key, limit=limit, min_confidence=min_confidence)
+
+    def record_nucleus_output(self, object_type: str, payload: dict, confidence: float = 0.35, source: str = 'nucleus') -> str:
+        return MemoryCompiler(self.conn).record_nucleus_output(object_type, payload, confidence=confidence, source=source)
 
     def record_revision(self, **kwargs: Any) -> str:
         return record_revision(self.conn, **kwargs)
@@ -214,6 +251,35 @@ class LiveBrainStore:
             """,
             (stale_cutoff, stale_cutoff, e2e_cutoff, max(1, min(int(limit or 200), 1000))),
         ).fetchall()
+
+    def _duplicate_active_work_item_rows(self) -> list[sqlite3.Row]:
+        rows: list[sqlite3.Row] = []
+        scope_rows = self.conn.execute(
+            """
+            SELECT scope_key, COUNT(*) count
+            FROM work_items
+            WHERE status IN ('active','blocked')
+            GROUP BY scope_key
+            HAVING COUNT(*) > 1
+            """
+        ).fetchall()
+        for scope_row in scope_rows:
+            candidates = self.conn.execute(
+                """
+                SELECT *
+                FROM work_items
+                WHERE scope_key=? AND status IN ('active','blocked')
+                ORDER BY
+                  CASE WHEN status='active' THEN 0 ELSE 1 END,
+                  priority DESC,
+                  updated_at DESC,
+                  created_at DESC,
+                  work_item_id DESC
+                """,
+                (scope_row['scope_key'],),
+            ).fetchall()
+            rows.extend(candidates[1:])
+        return rows
 
     def _self_evolution_expiry_reason(self, row: sqlite3.Row, *, now: float, stale_hours: float, e2e_seed_hours: float) -> str:
         trigger_text = str(row['trigger_text'] or '').lower()
@@ -414,6 +480,8 @@ class LiveBrainStore:
             'expired_rules': 0,
             'expired_epistemic_facts': 0,
             'expired_self_evolution_proposals': 0,
+            'superseded_duplicate_work_items': 0,
+            'scrubbed_sensitive_rows': 0,
             'recipe_ageing': {},
             'recipe_archiving': {},
         }
@@ -442,6 +510,8 @@ class LiveBrainStore:
                 (work_cutoff,),
             ).fetchall()
             summary['superseded_work_items'] = len(work_rows)
+            duplicate_work_rows = self._duplicate_active_work_item_rows()
+            summary['superseded_duplicate_work_items'] = len(duplicate_work_rows)
 
             belief_cutoff = started_at - max(1, int(low_confidence_belief_days or 30)) * 86400
             belief_rows = self.conn.execute(
@@ -474,6 +544,7 @@ class LiveBrainStore:
                 e2e_seed_hours=e2e_seed_pending_hours,
             )
             summary['expired_self_evolution_proposals'] = len(proposal_rows)
+            summary['scrubbed_sensitive_rows'] = self.scrub_sensitive_session_text(dry_run=True)['rows']
 
             summary['recipe_ageing'] = self.age_stale_recipes(dry_run=True)
             summary['recipe_archiving'] = self.archive_stale_review_recipes(dry_run=True)
@@ -497,6 +568,16 @@ class LiveBrainStore:
                     self.conn.execute("DELETE FROM working_set WHERE work_item_id=?", (row['work_item_id'],))
                     after = row_to_dict(self.conn.execute("SELECT * FROM work_items WHERE work_item_id=?", (row['work_item_id'],)).fetchone())
                     record_revision(self.conn, object_type='work_item', object_id=row['work_item_id'], action='supersede', reason='stale_low_priority_not_in_working_set', before=before, after=after, created_at=started_at)
+
+                for row in duplicate_work_rows:
+                    before = row_to_dict(row)
+                    self.conn.execute(
+                        "UPDATE work_items SET status='superseded', priority=0.05, resolved_at=COALESCE(resolved_at, ?), updated_at=? WHERE work_item_id=? AND status IN ('active','blocked')",
+                        (started_at, started_at, row['work_item_id']),
+                    )
+                    self.conn.execute("DELETE FROM working_set WHERE work_item_id=?", (row['work_item_id'],))
+                    after = row_to_dict(self.conn.execute("SELECT * FROM work_items WHERE work_item_id=?", (row['work_item_id'],)).fetchone())
+                    record_revision(self.conn, object_type='work_item', object_id=row['work_item_id'], action='supersede', reason='duplicate_active_work_item_same_scope', before=before, after=after, created_at=started_at)
 
                 for row in belief_rows:
                     before = row_to_dict(row)
@@ -533,6 +614,7 @@ class LiveBrainStore:
                     commit=False,
                 )
                 summary['expired_self_evolution_proposals'] = proposal_expiry['expired']
+                summary['scrubbed_sensitive_rows'] = self.scrub_sensitive_session_text(dry_run=False, now=started_at)['rows']
 
                 summary['recipe_ageing'] = self.age_stale_recipes(dry_run=False)
                 summary['recipe_archiving'] = self.archive_stale_review_recipes(dry_run=False)
@@ -557,6 +639,72 @@ class LiveBrainStore:
             )
             self.conn.commit()
             raise
+
+    def scrub_sensitive_session_text(self, *, dry_run: bool = True, now: float | None = None) -> dict[str, Any]:
+        """Redact secrets from persisted session/context text. Idempotent."""
+        started_at = float(now or time.time())
+        candidates: list[tuple[str, str, str, str]] = []
+
+        for row in self.conn.execute("SELECT scope_key, state_json FROM work_state").fetchall():
+            current = row['state_json'] or ''
+            redacted = redact_json_text(current)
+            if redacted != current:
+                candidates.append(('work_state', row['scope_key'], current, redacted))
+
+        for row in self.conn.execute("SELECT work_item_id, title, evidence_json FROM work_items").fetchall():
+            title = row['title'] or ''
+            evidence_json = row['evidence_json'] or ''
+            redacted_title = str(redact_for_storage(title))
+            redacted_evidence = redact_json_text(evidence_json)
+            if redacted_title != title:
+                candidates.append(('work_items.title', row['work_item_id'], title, redacted_title))
+            if redacted_evidence != evidence_json:
+                candidates.append(('work_items.evidence_json', row['work_item_id'], evidence_json, redacted_evidence))
+
+        for row in self.conn.execute("SELECT event_id, payload_json FROM reality_events").fetchall():
+            current = row['payload_json'] or ''
+            redacted = redact_json_text(current)
+            if redacted != current:
+                candidates.append(('reality_events', row['event_id'], current, redacted))
+
+        for row in self.conn.execute("SELECT impression_id, query_text FROM context_impressions").fetchall():
+            current = row['query_text'] or ''
+            redacted = str(redact_for_storage(current))
+            if redacted != current:
+                candidates.append(('context_impressions', row['impression_id'], current, redacted))
+
+        if dry_run:
+            return {'rows': len(candidates), 'status': 'dry_run'}
+
+        for target, identifier, before_value, after_value in candidates:
+            if target == 'work_state':
+                before = row_to_dict(self.conn.execute("SELECT * FROM work_state WHERE scope_key=?", (identifier,)).fetchone())
+                self.conn.execute("UPDATE work_state SET state_json=?, updated_at=? WHERE scope_key=?", (after_value, started_at, identifier))
+                after = row_to_dict(self.conn.execute("SELECT * FROM work_state WHERE scope_key=?", (identifier,)).fetchone())
+                record_revision(self.conn, object_type='work_state', object_id=identifier, action='redact', reason='scrub_sensitive_session_text', before=before, after=after, created_at=started_at)
+            elif target == 'work_items.title':
+                before = row_to_dict(self.conn.execute("SELECT * FROM work_items WHERE work_item_id=?", (identifier,)).fetchone())
+                self.conn.execute("UPDATE work_items SET title=?, updated_at=? WHERE work_item_id=?", (after_value, started_at, identifier))
+                after = row_to_dict(self.conn.execute("SELECT * FROM work_items WHERE work_item_id=?", (identifier,)).fetchone())
+                record_revision(self.conn, object_type='work_item', object_id=identifier, action='redact', reason='scrub_sensitive_session_text', before=before, after=after, created_at=started_at)
+            elif target == 'work_items.evidence_json':
+                before = row_to_dict(self.conn.execute("SELECT * FROM work_items WHERE work_item_id=?", (identifier,)).fetchone())
+                self.conn.execute("UPDATE work_items SET evidence_json=?, updated_at=? WHERE work_item_id=?", (after_value, started_at, identifier))
+                after = row_to_dict(self.conn.execute("SELECT * FROM work_items WHERE work_item_id=?", (identifier,)).fetchone())
+                record_revision(self.conn, object_type='work_item', object_id=identifier, action='redact', reason='scrub_sensitive_session_text', before=before, after=after, created_at=started_at)
+            elif target == 'reality_events':
+                before = row_to_dict(self.conn.execute("SELECT * FROM reality_events WHERE event_id=?", (identifier,)).fetchone())
+                self.conn.execute("UPDATE reality_events SET payload_json=? WHERE event_id=?", (after_value, identifier))
+                after = row_to_dict(self.conn.execute("SELECT * FROM reality_events WHERE event_id=?", (identifier,)).fetchone())
+                record_revision(self.conn, object_type='reality_event', object_id=identifier, action='redact', reason='scrub_sensitive_session_text', before=before, after=after, created_at=started_at)
+            elif target == 'context_impressions':
+                before = row_to_dict(self.conn.execute("SELECT * FROM context_impressions WHERE impression_id=?", (identifier,)).fetchone())
+                self.conn.execute("UPDATE context_impressions SET query_text=?, updated_at=? WHERE impression_id=?", (after_value, started_at, identifier))
+                after = row_to_dict(self.conn.execute("SELECT * FROM context_impressions WHERE impression_id=?", (identifier,)).fetchone())
+                record_revision(self.conn, object_type='context_impression', object_id=identifier, action='redact', reason='scrub_sensitive_session_text', before=before, after=after, created_at=started_at)
+
+        self.conn.commit()
+        return {'rows': len(candidates), 'status': 'ok'}
 
     def run_init_maintenance(
         self,
@@ -641,6 +789,27 @@ class LiveBrainStore:
 
     def record_epistemic_tool_result(self, **kwargs: Any) -> dict:
         return EpistemicManager(self.conn).record_tool_result(**kwargs)
+
+    def record_incident_failure(self, **kwargs: Any) -> dict:
+        return self.incident_truth_mgr.record_failure(**kwargs)
+
+    def record_incident_success(self, **kwargs: Any) -> dict | None:
+        return self.incident_truth_mgr.record_success(**kwargs)
+
+    def incident_truth_context(self, scope_key: str, query: str, *, limit: int = 2) -> List[str]:
+        return self.incident_truth_mgr.context_lines_for_query(scope_key, query, limit=limit)
+
+    def debug_incident_truth(self, scope_key: str, query: str = '') -> dict:
+        return self.incident_truth_mgr.debug(scope_key, query)
+
+    def record_turn_trace(self, **kwargs: Any) -> str:
+        return self.turn_trace_mgr.upsert_trace(**kwargs)
+
+    def append_turn_trace_tool_event(self, **kwargs: Any) -> str:
+        return self.turn_trace_mgr.append_tool_event(**kwargs)
+
+    def debug_turn_traces(self, scope_key: str, query: str = '', *, session_id: str = '', limit: int = 10) -> dict:
+        return self.turn_trace_mgr.debug(scope_key, query, session_id=session_id, limit=limit)
 
     def ingest_reality_event(self, **kwargs: Any) -> dict:
         return RealityEngine(self.conn).ingest_event(**kwargs)
@@ -1004,7 +1173,16 @@ class LiveBrainStore:
                 (work_item_id, row['scope_key'], row['session_id'], task[:160], status, priority, json.dumps(evidence), (row['next_step'] or '')[:300], (row['root_cause'] or '')[:500], row['created_at'], row['updated_at'], resolved_at),
             )
             inserted += int(cur.rowcount or 0)
-        if inserted:
+        deduped = 0
+        now = time.time()
+        for row in self._duplicate_active_work_item_rows():
+            cur = self.conn.execute(
+                "UPDATE work_items SET status='superseded', resolved_at=COALESCE(resolved_at, ?), priority=0.05, updated_at=? WHERE work_item_id=? AND status IN ('active','blocked')",
+                (now, now, row['work_item_id']),
+            )
+            self.conn.execute("DELETE FROM working_set WHERE work_item_id=?", (row['work_item_id'],))
+            deduped += int(cur.rowcount or 0)
+        if inserted or deduped:
             self.conn.commit()
         return inserted
 

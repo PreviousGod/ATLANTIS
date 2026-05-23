@@ -73,6 +73,11 @@ _REFLECTIVE_SIGNALS = re.compile(
     re.IGNORECASE,
 )
 
+_SIMPLE_FACTUAL_OR_STATUS_SIGNALS = re.compile(
+    r'\b(weather|time|date|today|tomorrow|dokle\s+si|gde\s+si|where\s+are\s+you|status\s+check)\b',
+    re.IGNORECASE,
+)
+
 
 def classify_complexity(user_message: str, fact_count: int, ruled_out_count: int = 0) -> int:
     """Return complexity tier: 1 (trivial), 2 (medium), 3 (complex)."""
@@ -87,14 +92,18 @@ def classify_complexity(user_message: str, fact_count: int, ruled_out_count: int
     # Purely reflective/evaluative queries cap at Tier 2 (verification needed, not full decomposition)
     if reflective_matches >= 1 and complex_matches < 2:
         return 2
+    # Simple factual/status checks should not trigger reasoning solely because no facts are available.
+    if (complex_matches == 0 and not has_multi_part and word_count <= 6
+            and _SIMPLE_FACTUAL_OR_STATUS_SIGNALS.search(msg)):
+        return 1
     # Tier 3: strongly complex, blocked by prior failures, or substantive with no facts
     if complex_matches >= 2 or ruled_out_count > 0:
         return 3
     if (complex_matches >= 1 and fact_count == 0) or (word_count > 25 and fact_count == 0):
         return 3
-    # Tier 2: some complexity, substantial length, multi-part, or moderately long message
+    # Tier 2: some complexity, substantial length, multi-part, no facts, or moderately long message
     if (complex_matches >= 1 or word_count > 20 or (word_count > 12 and has_multi_part)
-            or len(msg) > 40):
+            or len(msg) > 40 or fact_count == 0):
         return 2
     return 1
 

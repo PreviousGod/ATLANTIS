@@ -267,6 +267,48 @@ COMPOSE_QUERY_SCHEMA = {
     }
 }
 
+INCIDENT_TRUTH_DEBUG_SCHEMA = {
+    "name": "brain_incident_truth_debug",
+    "description": "Inspect compiled incident-truth objects for recurring coding/fixing issues.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "scope_key": {"type": "string"},
+            "query": {"type": "string", "description": "Optional query to match against incident truths."}
+        },
+        "required": []
+    }
+}
+
+TRACE_DEBUG_SCHEMA = {
+    "name": "brain_trace_debug",
+    "description": "Inspect replay-grade turn traces: routing decisions, injected context, tools, and responses.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "scope_key": {"type": "string"},
+            "session_id": {"type": "string"},
+            "query": {"type": "string"},
+            "limit": {"type": "integer", "default": 10}
+        },
+        "required": []
+    }
+}
+
+GRAPH_DEBUG_SCHEMA = {
+    "name": "brain_graph_debug",
+    "description": "Resolve a coding/debugging query through the operational entity graph and inspect relationship paths.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "max_depth": {"type": "integer", "default": 2},
+            "max_matches": {"type": "integer", "default": 8}
+        },
+        "required": ["query"]
+    }
+}
+
 
 class LiveBrainProvider(MemoryProvider):
     def __init__(self):
@@ -283,6 +325,8 @@ class LiveBrainProvider(MemoryProvider):
         self._dialectic = None
         self._user_alignment = None
         self._composition = None
+        self._incident_truth = None
+        self._turn_trace = None
         self._session_id = ""
         self._platform = "cli"
         self._agent_identity = ""
@@ -349,11 +393,15 @@ class LiveBrainProvider(MemoryProvider):
         from .dialectic import DialecticEngine
         from .user_alignment import UserAlignmentTracker
         from .compositional_query import CompositionEngine
+        from .incident_truth import IncidentTruthManager
+        from .turn_trace import TurnTraceManager
 
         self._entity_graph = EntityGraph(self._store.conn)
         self._dialectic = DialecticEngine(self._store.conn)
         self._user_alignment = UserAlignmentTracker(self._store.conn)
         self._composition = CompositionEngine(self._store.conn)
+        self._incident_truth = IncidentTruthManager(self._store.conn)
+        self._turn_trace = TurnTraceManager(self._store.conn)
 
         self._store.conn.execute(
             "INSERT OR REPLACE INTO sessions (session_id, platform, agent_identity, agent_context, user_id, gateway_session_key, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -371,15 +419,16 @@ class LiveBrainProvider(MemoryProvider):
         logger.info("[live_brain] initialized db=%s session=%s", db_path, self._session_id)
 
     def system_prompt_block(self) -> str:
+        # P1.4: cached for the entire session by Hermes core. Keep only the
+        # session-stable facts and one routing hint that genuinely applies
+        # every turn. Conditional policies (approval-queue routing, never-
+        # invent-secrets, epistemic isolation) are moved to live_brain_ctx
+        # _pre_llm_call so they ship only on turns where they apply.
         return (
             "# Live Brain\n"
             "Active. Recalled state distinguishes VALIDATED FACTS, OPEN HYPOTHESES, NEXT BEST ACTIONS, and LIVE REALITY situational awareness. "
             "Use LIVE REALITY to resolve short references like 'a link?' or 'uradi to' from current objective/open loops before asking generic clarification. "
-            "Do not treat hypotheses as validated causes without evidence. "
-            "Never infer hidden codenames, secrets, or remembered values from run IDs, suffixes, hashes, filenames, or the current prompt; answer UNKNOWN unless Live Brain context explicitly contains the value. "
-            "Approval queue routing is deterministic: if the user asks for pending approvals/approvals/approval queue/odobrenja, or asks to approve/reject latest, call brain_self_evolution(action='list', status='needs_approval') before answering; never use session_search, cronjob, or brain_state_debug for approval queue answers. "
-            "Before changing Live Brain code, config, DB schema, files, credentials, or media behavior, create a brain_self_evolution proposal and ask for approval; do not auto-apply high-risk changes. "
-            "Epistemic autonomy is active: when EPISTEMIC STATUS says research is required, do not answer from memory; use web_search/web_extract or brain_epistemic(action='search_web'), use only authoritative_sources, and for numeric/current/high-stakes claims extract/read official pages before recording facts. If extraction fails or browser/web_extract is unavailable, use brain_epistemic safe_answer, cite official URLs, and say exact values require the official page/bulletin; do not invent numbers, use secondary snippets, session_search, search_files, or record facts from search-result titles only."
+            "Do not treat hypotheses as validated causes without evidence."
         )
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
@@ -434,6 +483,12 @@ class LiveBrainProvider(MemoryProvider):
                 try:
                     if conn:
                         conn.rollback()
+                except Exception:
+                    pass
+            finally:
+                try:
+                    if conn and self._conn_pool:
+                        self._conn_pool.release_connection(conn)
                 except Exception:
                     pass
 
@@ -502,8 +557,11 @@ class LiveBrainProvider(MemoryProvider):
         self._ingestor.ingest_delegation(task=task, result=result, child_session_id=child_session_id, created_at=time.time(), session_id=self._session_id, scope_key=self._scope_key)
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [
-            STATE_DEBUG_SCHEMA,
+        # P1.3: debug-only schemas are gated behind LIVE_BRAIN_EXPOSE_DEBUG_TOOLS.
+        # Handlers stay wired so the env var is a runtime toggle, not a feature
+        # flag that requires reload. Default off — these 4 tools added ~3 KB
+        # to every tool list and almost never improved a real answer.
+        schemas: List[Dict[str, Any]] = [
             REALITY_DEBUG_SCHEMA,
             RECAP_SCHEMA,
             BELIEF_MARK_SCHEMA,
@@ -519,6 +577,14 @@ class LiveBrainProvider(MemoryProvider):
             USER_PROFILE_SCHEMA,
             COMPOSE_QUERY_SCHEMA,
         ]
+        if os.environ.get("LIVE_BRAIN_EXPOSE_DEBUG_TOOLS", "").strip().lower() in {"1", "true", "yes", "on"}:
+            schemas.extend([
+                STATE_DEBUG_SCHEMA,
+                INCIDENT_TRUTH_DEBUG_SCHEMA,
+                TRACE_DEBUG_SCHEMA,
+                GRAPH_DEBUG_SCHEMA,
+            ])
+        return schemas
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         """Dispatch ``tool_name`` to its registered handler.
@@ -557,6 +623,9 @@ class LiveBrainProvider(MemoryProvider):
             'brain_synthesize': self._handle_synthesize,
             'brain_user_profile': self._handle_user_profile,
             'brain_compose_query': self._handle_compose_query,
+            'brain_incident_truth_debug': self._handle_incident_truth_debug,
+            'brain_trace_debug': self._handle_trace_debug,
+            'brain_graph_debug': self._handle_graph_debug,
         }
         self._tool_handler_map = mapping
         return mapping
@@ -808,6 +877,30 @@ class LiveBrainProvider(MemoryProvider):
         similar = self._composition.find_similar(query_vector, args.get("top_k", 5))
         return json.dumps({"similar": similar}, ensure_ascii=False)
 
+    def _handle_incident_truth_debug(self, args: Dict[str, Any]) -> str:
+        if not self._incident_truth:
+            return tool_error("Incident truth manager is not initialized")
+        scope_key = args.get("scope_key") or self._scope_key
+        return json.dumps(self._incident_truth.debug(scope_key, args.get("query", "")), ensure_ascii=False)
+
+    def _handle_trace_debug(self, args: Dict[str, Any]) -> str:
+        if not self._turn_trace:
+            return tool_error("Turn trace manager is not initialized")
+        scope_key = args.get("scope_key") or self._scope_key
+        session_id = args.get("session_id") or self._session_id
+        result = self._turn_trace.debug(scope_key, args.get("query", ""), session_id=session_id, limit=int(args.get("limit", 10)))
+        return json.dumps(result, ensure_ascii=False)
+
+    def _handle_graph_debug(self, args: Dict[str, Any]) -> str:
+        if not self._entity_graph:
+            return tool_error("Entity graph is not initialized")
+        result = self._entity_graph.resolve_operational_query(
+            args.get("query", ""),
+            max_depth=int(args.get("max_depth", 2)),
+            max_matches=int(args.get("max_matches", 8)),
+        )
+        return json.dumps(result, ensure_ascii=False)
+
     def shutdown(self) -> None:
         # Drain the bounded sync executor with a deadline so we don't block
         # gateway teardown indefinitely.
@@ -863,4 +956,7 @@ __all__ = [
     "DIALECTIC_SCHEMA",
     "USER_PROFILE_SCHEMA",
     "COMPOSE_QUERY_SCHEMA",
+    "INCIDENT_TRUTH_DEBUG_SCHEMA",
+    "TRACE_DEBUG_SCHEMA",
+    "GRAPH_DEBUG_SCHEMA",
 ]

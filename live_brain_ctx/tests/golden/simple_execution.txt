@@ -1,0 +1,44 @@
+ACTIVE OBJECTIVES:
+- Land all remaining context perfection phases.
+
+ACTIVE TASK:
+Wire P3.2 nucleus_bridge cross-plugin state.
+
+FILE KNOWLEDGE:
+- /home/u/proj/main.py: entrypoint, calls run_loop()
+- /home/u/proj/run_loop.py: main loop, polls every 10s
+
+KNOWN FACTS:
+- Provider is MiniMax-M2.7-highspeed.
+- Cache hit rate ~99% on stable turns.
+
+LIVE BRAIN POLICY:
+Stay laser-focused on the user's last imperative.
+
+MUST FOLLOW:
+- Plugin-only patches; no Hermes core edits.
+- E2E gate via Telegram CLI before declaring done.
+
+NEXT REQUIRED ACTION:
+Run the full live_brain_ctx test suite.
+
+RECALLED FIX:
+- 2026-04-02 (similar query): added timeout to httpx, fixed hang.
+
+RECENT EPISODES:
+- 2026-05-18 21:00 — completed P5.1 prompt cache observability.
+- 2026-05-19 02:26 — wiring P3.2 bridge state.
+
+RECENT RISK ACTIVITY:
+- 5m ago: shell — rm -rf /tmp/danger
+- pending patch (risk=0.8): /etc/foo.conf
+Confirm each of these was intended; the system did not block them.
+
+UNVERIFIED CLAIM:
+- claim: build passes — but no run recorded
+
+VERIFICATION REQUIRED:
+- /home/u/proj/main.py awaiting verify
+
+VERIFIED ARTIFACTS:
+- /home/u/proj/notes.md (verified 1h ago)

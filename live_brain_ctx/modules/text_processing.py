@@ -1,7 +1,8 @@
 """Text filtering and redaction for live_brain_ctx."""
 
+import json
 import re
-from typing import List
+from typing import Any, List
 
 
 # Constants
@@ -15,7 +16,7 @@ _MUSIC_MEMORY_ALIASES = (
 )
 
 # Regexes
-_SECRET_RE = re.compile(r'\b(?:sk-[A-Za-z0-9_-]{12,}|sk-or-v1-[A-Za-z0-9_-]{12,}|[A-Za-z0-9_]*(?:api[_-]?key|token|secret)[A-Za-z0-9_]*\s*[:=]\s*\S+)', re.IGNORECASE)
+_SECRET_RE = re.compile(r'\b(?:sk-[A-Za-z0-9_-]{12,}|sk-or-v1-[A-Za-z0-9_-]{12,}|[A-Za-z0-9_]*(?:api[_-]?key|token|secret|password|passwd|bearer)[A-Za-z0-9_]*\s*[:=]\s*\S+)', re.IGNORECASE)
 _NOISY_MEMORY_RE = re.compile(
     r'(##\s*summary|###\s*situacija|the user sent an image|the user sent a voice message|selfie photo|personal trust|'
     r'gave me his selfie|openrouter api key|api key \(active|client_secret|review the conversation above)',
@@ -46,6 +47,28 @@ def _truncate_fact(text: str) -> str:
 def _redact(text: str) -> str:
     text = _SECRET_RE.sub('[REDACTED_SECRET]', text or '')
     return re.sub(r'\bAPI\s*key\w*\b', 'credential', text, flags=re.IGNORECASE)
+
+
+def redact_for_storage(value: Any) -> Any:
+    """Redact secrets recursively before persisting user-controlled data."""
+    if isinstance(value, str):
+        return _redact(value)
+    if isinstance(value, list):
+        return [redact_for_storage(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): redact_for_storage(item) for key, item in value.items()}
+    return value
+
+
+def redact_json_text(raw: str) -> str:
+    """Redact a JSON document string while preserving its shape when possible."""
+    if not raw:
+        return raw
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return _redact(raw)
+    return json.dumps(redact_for_storage(parsed), ensure_ascii=False, sort_keys=True)
 
 
 def _expand_query_words(words: List[str], low_signal_words: set) -> List[str]:
