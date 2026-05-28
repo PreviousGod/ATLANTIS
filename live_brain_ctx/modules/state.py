@@ -34,17 +34,23 @@ CHIT_CHAT_PATTERNS: set[str] = {
     # Serbian / Croatian / Bosnian
     'zdravo', 'cao', 'ćao', 'ajde', 'nastavi', 'cekaj', 'čekaj', 'naravno',
     'sta ima', 'šta ima', 'kako si', 'da', 'ne',
+    'hvala', 'hvala ti', 'fala', 'super', 'odlično', 'odlicno', 'extra',
+    'top', 'svaka cast', 'svaka čast', 'bravo',
     # Russian
     'privet', 'привет', 'zdorovo', 'здорово', 'da net', 'да нет',
     'kak dela', 'как дела', 'ladno', 'ладно', 'horosho', 'хорошо',
     'ponyatno', 'понятно', 'prodolzhai', 'продолжай', 'prodolzai',
     'davai', 'давай', 'poka', 'пока', 'spasibo', 'спасибо',
-    'okey', 'окей', 'ok', 'ага', 'aga', 'uhu', 'угу',
+    'okey', 'окей', 'ага', 'aga', 'uhu', 'угу',
+    'otlichno', 'отлично', 'super', 'супер', 'kruto', 'круто',
+    'klass', 'класс', 'krasava', 'красава', 'molodets', 'молодец',
     # Ukrainian
     'pryvit', 'привіт', 'zdorov', 'здоров', 'dobre', 'добре',
     'harazd', 'гаразд', 'zvichaino', 'звічайно', 'prodovzhui', 'продовжуй',
-    'davai', 'давай', 'diakuiu', 'дякую', 'zrozumilo', 'зрозуміло',
+    'diakuiu', 'дякую', 'zrozumilo', 'зрозуміло',
     'tak', 'так', 'ni', 'ні', 'chekai', 'чекай',
+    'vidminno', 'відмінно', 'super', 'супер', 'kruto', 'круто',
+    'klas', 'клас', 'krasavchyk', 'красавчик', 'molodets', 'молодець',
     # English
     'hello', 'hi', 'hey', 'ok', 'hmm', 'hm',
 }

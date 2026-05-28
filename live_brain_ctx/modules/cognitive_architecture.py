@@ -130,10 +130,44 @@ _SIMPLE_FACTUAL_OR_STATUS_SIGNALS = re.compile(
     re.IGNORECASE,
 )
 
+# P2.9: praise/compliment detection. Messages that are purely complimentary
+# should NOT trigger cognitive reasoning — they're chit-chat, not tasks.
+# "kako mozes tako opasno" looks complex (contains "kako") but is a compliment.
+_PRAISE_SIGNALS = re.compile(
+    r'\b(?:'
+    # Serbian
+    r'ne razumem kako|neverovatno|neverovatno|svaka cast|svaka čast|bravo|'
+    r'odlično|odlicno|super|extra|top|genijalan|genijalno|car|caru|kralju|'
+    r'precizan|pametan|efikasn|efici|kreativan|opasan si|opasno|jebeno|jeben|'
+    r'impresivno|fascinantno|neverovatan|nevjerojatan|predobar|predobro|'
+    r'sjajan|sjajno|fantastičan|fantasticno|savrsen|savršen|perfektan|'
+    r'najaci|najjači|najjaci| ubijaš|ubijas| razbijaš|razbijas|'
+    # Russian
+    r'не понимаю как|ne ponimayu kak|невероятно|neveroyatno|потрясающе|potryasayushche|'
+    r'отлично|otlichno|супер|super|круто|kruto|гениально|genialno|'
+    r'красава|krasava|молодец|molodets|шикарно|shikarno|офигенно|ofigenno|'
+    r'точно|tochno|эффективно|effektivno|креативно|kreativno|'
+    r'классно|klassno|здорово|zdorovo|пушка|pushka|бомба|bomba|'
+    # Ukrainian
+    r'не розумію як|ne rozumiiu iak|неймовірно|neimovirno|приголомшливо|pryholomshlyvo|'
+    r'відмінно|vidminno|супер|super|круто|kruto|геніально|henialno|'
+    r'красавчик|krasavchyk|молодець|molodets|шикарно|shykarno|офігенно|ofigenno|'
+    r'точно|tochno|ефективно|efektyvno|креативно|kreatyvno|'
+    r'класно|klasno|здорово|zdorovo|гармата|harmata|бомба|bomba|'
+    # English
+    r'amazing|incredible|impressive|wow|brilliant|genius|perfect|excellent|'
+    r'fantastic|outstanding|remarkable|killing it|you.re (?:a|so|insanely|incredibly)'
+    r')\b',
+    re.IGNORECASE,
+)
+
 
 def classify_complexity(user_message: str, fact_count: int, ruled_out_count: int = 0) -> int:
     """Return complexity tier: 1 (trivial), 2 (medium), 3 (complex)."""
     msg = (user_message or "").strip()
+    # P2.9: praise/compliments are never complex — force Tier 1
+    if _PRAISE_SIGNALS.search(msg):
+        return 1
     if not msg or _TRIVIAL_SIGNALS.match(msg) or len(msg) < 15:
         return 1
     words = msg.split()
