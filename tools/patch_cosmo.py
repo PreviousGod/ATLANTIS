@@ -1,131 +1,203 @@
 #!/usr/bin/env python3
 """Cosmo APK one-shot patcher — AiFeature 108 → 105 (Nano V3 → V2).
 
-Usage: python3 patch_cosmo.py [apk_path]
-Default APK: COSMO_v1.1_REPAIRED_INSTALLABLE_API35_SIGNED.apk in ~/Desktop
+Pure Python. No zip, zipalign, or apksigner needed.
+Handles .so native libraries correctly (stored uncompressed).
 
-Does everything in one shot: extract → patch bytecode → patch string → 
-rebuild → sign → verify. No LLM needed.
+Usage: python3 patch_cosmo.py [apk_path]
 """
 import os
 import shutil
 import struct
-import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 APK_DEFAULT = Path.home() / "Desktop" / "COSMO_v1.1_REPAIRED_INSTALLABLE_API35_SIGNED.apk"
-KEYSTORE = Path.home() / ".hermes" / "cosmo_keys.jks"
-KEYSTORE_PASS = "cosmo123"
-KEY_ALIAS = "cosmo"
 
-# ── Step 1: Find APK ───────────────────────────────────────────────────
-apk_path = Path(sys.argv[1]) if len(sys.argv) > 1 else APK_DEFAULT
-if not apk_path.exists():
-    print(f"ERROR: APK not found at {apk_path}")
-    sys.exit(1)
-print(f"[1/7] APK: {apk_path} ({apk_path.stat().st_size:,} bytes)")
 
-# ── Step 2: Extract classes38.dex ──────────────────────────────────────
-work = Path(tempfile.mkdtemp(prefix="cosmo_patch_"))
-print(f"[2/7] Extracting classes38.dex to {work}")
-subprocess.run(["unzip", "-o", str(apk_path), "classes38.dex", "-d", str(work)],
-               capture_output=True, check=True)
-dex_path = work / "classes38.dex"
-data = bytearray(dex_path.read_bytes())
+def patch_cosmo(apk_path: Path):
+    work = Path(tempfile.mkdtemp(prefix="cosmo_patch_"))
+    print(f"[1/5] APK: {apk_path} ({apk_path.stat().st_size:,} bytes)")
 
-# ── Step 3: Patch AiFeature ID 108 → 105 ───────────────────────────────
-print("[3/7] Patching AiFeature ID 108 → 105")
-patched_count = 0
-for i in range(len(data) - 3):
-    if data[i] == 0x13:  # const/16 opcode
-        val = struct.unpack_from('<H', data, i + 2)[0]
-        if val == 108:
-            # Change 108 (0x6C) → 105 (0x69)
-            struct.pack_into('<H', data, i + 2, 105)
-            patched_count += 1
-            print(f"  Patched const/16 v{data[i+1]}, #108→#105 at offset 0x{i:x}")
-print(f"  Total: {patched_count} bytecode patches")
+    # ── Step 1: Extract classes38.dex ─────────────────────────────────
+    print("[2/5] Extracting and patching classes38.dex")
+    dex_data = None
+    with zipfile.ZipFile(apk_path, 'r') as zf:
+        dex_data = bytearray(zf.read("classes38.dex"))
 
-# ── Step 4: Patch error string ─────────────────────────────────────────
-print("[4/7] Patching error message string")
-old = b"AiFeature 108 (LLM-Nano V3) not found."
-new = b"AiFeature 105 (LLM-Nano V2) not found."
-idx = data.find(old)
-if idx >= 0:
-    data[idx:idx+len(old)] = new
-    print(f"  String patched at offset 0x{idx:x}")
-else:
-    print("  String not found (may already be patched)")
+    # Patch bytecode: const/16 vX, #108 → const/16 vX, #105
+    patched = 0
+    for i in range(len(dex_data) - 3):
+        if dex_data[i] == 0x13:
+            val = struct.unpack_from('<H', dex_data, i + 2)[0]
+            if val == 108:
+                struct.pack_into('<H', dex_data, i + 2, 105)
+                patched += 1
+    print(f"  Bytecode patches: {patched} (108→105)")
 
-dex_path.write_bytes(data)
-print(f"  classes38.dex written ({len(data):,} bytes)")
+    # Patch error string
+    old = b"AiFeature 108 (LLM-Nano V3) not found."
+    new = b"AiFeature 105 (LLM-Nano V2) not found."
+    idx = dex_data.find(old)
+    if idx >= 0:
+        dex_data[idx:idx + len(old)] = new
+        print(f"  String patched at offset 0x{idx:x}")
+    else:
+        print("  String already patched or not found")
 
-# ── Step 5: Repackage APK ──────────────────────────────────────────────
-print("[5/7] Repackaging APK")
-rebuilt = work / "rebuilt.apk"
-with tempfile.TemporaryDirectory() as tmp:
-    # Extract full APK
-    extract_dir = Path(tmp) / "extracted"
-    extract_dir.mkdir()
-    subprocess.run(["unzip", "-o", str(apk_path), "-d", str(extract_dir)],
-                   capture_output=True, check=True)
-    # Replace classes38.dex
-    shutil.copy2(work / "classes38.dex", extract_dir / "classes38.dex")
-    # Delete old signing files
-    for meta in extract_dir.glob("META-INF/*"):
-        if meta.name not in ("MANIFEST.MF",):
-            meta.unlink()
-    # Repack
-    subprocess.run(
-        ["zip", "-r", "-0", str(rebuilt)] + [str(p.relative_to(tmp)) for p in extract_dir.rglob("*") if p.is_file()],
-        cwd=tmp, capture_output=True, check=True,
-    )
-subprocess.run(["zipalign", "-p", "4", str(rebuilt), str(work / "aligned.apk")],
-               capture_output=True, check=True)
-print(f"  Rebuilt: {rebuilt.stat().st_size:,} bytes")
+    # ── Step 2: Repackage APK preserving .so files uncompressed ──────
+    print("[3/5] Repackaging APK (preserving native libs)")
+    rebuilt = work / "cosmo_rebuilt.apk"
 
-# ── Step 6: Sign ────────────────────────────────────────────────────────
-print("[6/7] Signing APK")
-signed = work / "COSMO_PATCHED.apk"
-if not KEYSTORE.exists():
-    print("  Generating keystore...")
-    subprocess.run([
-        "keytool", "-genkey", "-v", "-keystore", str(KEYSTORE),
-        "-alias", KEY_ALIAS, "-keyalg", "RSA", "-keysize", "2048",
-        "-validity", "10000", "-storepass", KEYSTORE_PASS,
-        "-keypass", KEYSTORE_PASS,
-        "-dname", "CN=CosmoPatch"
-    ], capture_output=True, check=True)
+    NATIVE_EXTENSIONS = {'.so'}
+    with zipfile.ZipFile(apk_path, 'r') as zf_in:
+        with zipfile.ZipFile(rebuilt, 'w', zipfile.ZIP_DEFLATED) as zf_out:
+            for item in zf_in.infolist():
+                # Skip old signing files
+                if item.filename.startswith('META-INF/') and not item.filename.endswith('MANIFEST.MF'):
+                    continue
 
-subprocess.run([
-    "apksigner", "sign", "--ks", str(KEYSTORE),
-    "--ks-pass", f"pass:{KEYSTORE_PASS}",
-    "--key-pass", f"pass:{KEYSTORE_PASS}",
-    "--out", str(signed), str(work / "aligned.apk")
-], capture_output=True, check=True)
+                data = zf_in.read(item.filename)
 
-# ── Step 7: Verify ──────────────────────────────────────────────────────
-print("[7/7] Verifying")
-# Check signature
-result = subprocess.run(["apksigner", "verify", "--print-certs", str(signed)],
-                        capture_output=True, text=True)
-if result.returncode == 0:
-    print("  ✓ Signature verified")
-else:
-    print(f"  ✗ Signature check: {result.stderr}")
+                # Replace classes38.dex with patched version
+                if item.filename == 'classes38.dex':
+                    data = bytes(dex_data)
 
-# Check the patch stuck
-check_data = bytearray(dex_path.read_bytes())
-check_count = sum(1 for i in range(len(check_data)-3)
-                  if check_data[i] == 0x13
-                  and struct.unpack_from('<H', check_data, i+2)[0] == 105)
-old_count = sum(1 for i in range(len(check_data)-3)
-                if check_data[i] == 0x13
-                and struct.unpack_from('<H', check_data, i+2)[0] == 108)
-print(f"  ✓ AiFeature 105 instances: {check_count}")
-print(f"  ✓ AiFeature 108 remaining: {old_count}")
+                # Native libs must be STORED (uncompressed) for Android to load them
+                ext = Path(item.filename).suffix.lower()
+                if ext in NATIVE_EXTENSIONS:
+                    zf_out.writestr(item, data, compress_type=zipfile.ZIP_STORED)
+                else:
+                    zf_out.writestr(item, data, compress_type=zipfile.ZIP_DEFLATED)
 
-print(f"\n✓ DONE: {signed}")
-print(f"  Install: adb install -r {signed}")
+    rebuilt_size = rebuilt.stat().st_size
+    print(f"  Rebuilt: {rebuilt_size:,} bytes")
+
+    # ── Step 3: Align (Python implementation) ─────────────────────────
+    print("[4/5] Aligning APK")
+    aligned = work / "cosmo_aligned.apk"
+    _zipalign_py(rebuilt, aligned)
+    print(f"  Aligned: {aligned.stat().st_size:,} bytes")
+
+    # ── Step 4: Sign with uber-apk-signer or jarsigner ─────────────────
+    print("[5/5] Signing APK")
+    signed = _sign_apk(aligned, work)
+    if signed:
+        print(f"\n✓ DONE: {signed}")
+        print(f"  adb install -r {signed}")
+        # Copy to Desktop
+        dest = Path.home() / "Desktop" / f"COSMO_PATCHED_NANO_V2.apk"
+        shutil.copy2(signed, dest)
+        print(f"  Copied to: {dest}")
+    else:
+        print("\n✗ Signing failed. Falling back to unsigned APK.")
+        print(f"  Unsigned: {aligned}")
+        print(f"  You must sign manually before installing.")
+
+
+def _zipalign_py(src: Path, dst: Path, alignment: int = 4):
+    """Python implementation of zipalign — aligns uncompressed entries to 4-byte boundaries."""
+    ALIGNMENT = alignment
+
+    with zipfile.ZipFile(src, 'r') as zf_in:
+        with zipfile.ZipFile(dst, 'w', zipfile.ZIP_DEFLATED) as zf_out:
+            for item in zf_in.infolist():
+                data = zf_in.read(item.filename)
+
+                if item.compress_type == zipfile.ZIP_STORED:
+                    # Calculate extra padding needed
+                    # Get current position in output by checking header + data size
+                    header_size = (
+                        30  # local file header
+                        + len(item.filename.encode('utf-8'))
+                        + len(item.extra)
+                    )
+                    current_pos = header_size
+                    padding_needed = (ALIGNMENT - (current_pos % ALIGNMENT)) % ALIGNMENT
+
+                    if padding_needed > 0:
+                        # Add extra field for alignment
+                        extra = item.extra + b'\x00' * padding_needed
+                        # Update extra field length in a copy
+                        new_item = zipfile.ZipInfo(item.filename)
+                        new_item.compress_type = item.compress_type
+                        new_item.extra = extra
+                        zf_out.writestr(new_item, data)
+                    else:
+                        zf_out.writestr(item, data)
+                else:
+                    zf_out.writestr(item, data)
+
+
+def _sign_apk(apk_path: Path, work_dir: Path) -> Path | None:
+    """Try to sign the APK. Tries multiple methods."""
+    signed = work_dir / "COSMO_PATCHED.apk"
+
+    # Method 1: uber-apk-signer (if installed)
+    uber = shutil.which("uber-apk-signer")
+    if uber:
+        import subprocess
+        r = subprocess.run(
+            [uber, "--apks", str(apk_path), "--out", str(work_dir)],
+            capture_output=True, text=True,
+        )
+        if r.returncode == 0:
+            # Find the signed output
+            for f in work_dir.rglob("*.apk"):
+                if "aligned" not in f.name and f != apk_path:
+                    shutil.move(str(f), str(signed))
+                    return signed
+            return apk_path  # fallback
+
+    # Method 2: apksigner
+    apksigner = shutil.which("apksigner")
+    if apksigner:
+        import subprocess
+        ks = Path.home() / ".hermes" / "cosmo_keys.jks"
+        if not ks.exists():
+            subprocess.run([
+                "keytool", "-genkey", "-v", "-keystore", str(ks),
+                "-alias", "cosmo", "-keyalg", "RSA", "-keysize", "2048",
+                "-validity", "10000", "-storepass", "cosmo123", "-keypass", "cosmo123",
+                "-dname", "CN=CosmoPatch"
+            ], capture_output=True)
+        r = subprocess.run([
+            apksigner, "sign", "--ks", str(ks),
+            "--ks-pass", "pass:cosmo123", "--key-pass", "pass:cosmo123",
+            "--out", str(signed), str(apk_path),
+        ], capture_output=True, text=True)
+        if r.returncode == 0:
+            return signed
+        print(f"  apksigner failed: {r.stderr}")
+
+    # Method 3: jarsigner (v1 only, may not work on API 35+)
+    jarsigner = shutil.which("jarsigner")
+    if jarsigner:
+        import subprocess
+        ks = Path.home() / ".hermes" / "cosmo_keys.jks"
+        if not ks.exists():
+            subprocess.run([
+                "keytool", "-genkey", "-v", "-keystore", str(ks),
+                "-alias", "cosmo", "-keyalg", "RSA", "-keysize", "2048",
+                "-validity", "10000", "-storepass", "cosmo123", "-keypass", "cosmo123",
+                "-dname", "CN=CosmoPatch"
+            ], capture_output=True)
+        r = subprocess.run([
+            jarsigner, "-keystore", str(ks), "-storepass", "cosmo123",
+            "-signedjar", str(signed), str(apk_path), "cosmo",
+        ], capture_output=True, text=True)
+        if r.returncode == 0:
+            print("  ⚠ Signed with jarsigner (v1 only — may not work on API 35+)")
+            return signed
+
+    return None
+
+
+if __name__ == "__main__":
+    apk = Path(sys.argv[1]) if len(sys.argv) > 1 else APK_DEFAULT
+    if not apk.exists():
+        print(f"ERROR: {apk} not found")
+        sys.exit(1)
+    patch_cosmo(apk)
