@@ -50,6 +50,26 @@ VERIFICATION: After <attack>, your response MUST contain the exact string:
 ATTACK_COMPLETED: followed by at least one sentence summarising the attack result.
 If this string is missing, the system will reject the response and prompt you to retry."""
 
+FAILURE_DIAGNOSIS_PROTOCOL = """\
+FAILURE DIAGNOSIS (mandatory when a tool call failed):
+1. <diagnose> State EXACTLY what the error says. Quote it. What does this error ACTUALLY mean?
+   - "command not found" → the tool binary is NOT installed. Find an alternative.
+   - "INSTALL_FAILED_INVALID_APK: native libraries" → .so files compressed. Store uncompressed.
+   - "ModuleNotFoundError: No module named X" → pip install X or use a different approach.
+   - "Permission denied" → check file ownership, not a retry.
+   - Do NOT retry with the same tool if the error is environmental (missing binary, wrong permissions). </diagnose>
+2. <root_cause> What is the FUNDAMENTAL reason this failed? Is it:
+   - Missing tool? → find alternative that exists, or install it
+   - Wrong approach? → what assumption was wrong?
+   - Environmental? → check what IS available before proceeding </root_cause>
+3. <alternative> Propose a DIFFERENT approach that works with what IS available.
+   - If Python is available but zip isn't → use zipfile module
+   - If apksigner isn't installed → use jarsigner or uber-apk-signer
+   - If nothing works → TELL THE USER what's missing instead of retrying </alternative>
+
+CRITICAL: After 2 consecutive failures of the same type, you MUST NOT retry.
+You MUST explain the root cause and ask the user for direction."""
+
 CONFIDENCE_GATE_MARKER = """\
 ⚠️ RESEARCH REQUIRED: Less than 2 verified facts available for this query.
 You MUST use brain_epistemic(action=search_web) or explicitly state "I don't have verified information on this" rather than answering from training memory."""
@@ -373,6 +393,8 @@ def get_cognitive_context(
             constraint_lines.append(f"  ✗ {entry['approach']} — because: {entry['reason']}")
         constraint_lines.append("Any new approach MUST NOT depend on the same assumptions that caused the above failures.")
         parts.append("\n".join(constraint_lines))
+        # Inject failure diagnosis protocol when there are prior failures
+        parts.append(FAILURE_DIAGNOSIS_PROTOCOL)
 
     # Cross-domain hints (Tier 2+ gets analogies, not just Tier 3)
     if tier >= 2 and db_conn and query_words:

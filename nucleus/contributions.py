@@ -142,9 +142,12 @@ def _detect_stuck_loop(state, session_id: str) -> str:
         f"NUCLEUS STUCK DETECTED:\n"
         f"- {consecutive} consecutive failures of tool '{last_tool}'.\n"
         f"- STOP all tool calls IMMEDIATELY.\n"
-        f"- Do NOT retry '{last_tool}' — it will fail again.\n"
-        f"- Tell the user what went wrong and what you need to proceed.\n"
-        f"- If you have an alternative approach, explain it to the user BEFORE trying it."
+        f"- DIAGNOSE the error: what EXACTLY failed, and WHY?\n"
+        f"- \"command not found\" means the tool is NOT installed — find an alternative.\n"
+        f"- \"INSTALL_FAILED\" means your packaging is broken — don't retry, fix the method.\n"
+        f"- \"ModuleNotFoundError\" means pip install or different approach.\n"
+        f"- Do NOT retry '{last_tool}' — it will fail again for the SAME reason.\n"
+        f"- Explain the ROOT CAUSE to the user and propose a DIFFERENT approach."
     )
 
 
