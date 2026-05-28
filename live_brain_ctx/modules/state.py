@@ -31,17 +31,48 @@ MAX_FACT_LEN = 200
 # Mutable configuration (rebound by apply_context_config)
 # ---------------------------------------------------------------------------
 CHIT_CHAT_PATTERNS: set[str] = {
-    'zdravo', 'hello', 'hi', 'ok', 'da', 'ne', 'hmm', 'hm', 'ajde', 'nastavi',
-    'cekaj', 'čekaj', 'naravno', 'sta ima', 'kako si',
+    # Serbian / Croatian / Bosnian
+    'zdravo', 'cao', 'ćao', 'ajde', 'nastavi', 'cekaj', 'čekaj', 'naravno',
+    'sta ima', 'šta ima', 'kako si', 'da', 'ne',
+    # Russian
+    'privet', 'привет', 'zdorovo', 'здорово', 'da net', 'да нет',
+    'kak dela', 'как дела', 'ladno', 'ладно', 'horosho', 'хорошо',
+    'ponyatno', 'понятно', 'prodolzhai', 'продолжай', 'prodolzai',
+    'davai', 'давай', 'poka', 'пока', 'spasibo', 'спасибо',
+    'okey', 'окей', 'ok', 'ага', 'aga', 'uhu', 'угу',
+    # Ukrainian
+    'pryvit', 'привіт', 'zdorov', 'здоров', 'dobre', 'добре',
+    'harazd', 'гаразд', 'zvichaino', 'звічайно', 'prodovzhui', 'продовжуй',
+    'davai', 'давай', 'diakuiu', 'дякую', 'zrozumilo', 'зрозуміло',
+    'tak', 'так', 'ni', 'ні', 'chekai', 'чекай',
+    # English
+    'hello', 'hi', 'hey', 'ok', 'hmm', 'hm',
 }
 
 LOW_SIGNAL_WORDS: set[str] = {
     'problem', 'plugin', 'memory', 'brain', 'generation', 'generate',
-    'napravi', 'uradi', 'kako', 'sta', 'šta', 'what', 'which', 'with',
-    'radi', 'recap', 'poslednje', 'uradjeno', 'urađeno', 'gde', 'gdje',
-    'dje', 'stali', 'stao', 'stala', 'rekao', 'rekla', 'rekli', 'sam', 'smo',
+    # Serbian / Croatian / Bosnian
+    'napravi', 'uradi', 'kako', 'sta', 'šta', 'radi', 'recap',
+    'poslednje', 'uradjeno', 'urađeno', 'gde', 'gdje', 'dje',
+    'stali', 'stao', 'stala', 'rekao', 'rekla', 'rekli', 'sam', 'smo',
     'odgovori', 'odgovor', 'sećanja', 'secanja', 'secanca',
     'traži', 'trazi', 'ponavljam', 'ponavljati', 'ponovi',
+    # Russian
+    'sdelai', 'сделай', 'sdelat', 'сделать', 'kak', 'как', 'chto', 'что',
+    'gde', 'где', 'kuda', 'куда', 'zachem', 'зачем', 'pochemu', 'почему',
+    'kakoj', 'какой', 'skazhi', 'скажи', 'rasskazhi', 'расскажи',
+    'otvet', 'ответ', 'povtori', 'повтори', 'pomniu', 'помню',
+    'proshlyj', 'прошлый', 'poslednij', 'последний', ' bylo', 'было',
+    'sdelano', 'сделано', 'pomogite', 'помогите',
+    # Ukrainian
+    'zroby', 'зроби', 'zrobyty', 'зробити', 'iak', 'як', 'shcho', 'що',
+    'de', 'де', 'kudy', 'куди', 'chomu', 'чому', 'navishcho', 'навіщо',
+    'iakii', 'який', 'skazhy', 'скажи', 'rozpovisy', 'розповіси',
+    'vidpovid', 'відповідь', 'povtory', 'повтори', 'pamiataiu', 'пам\'ятаю',
+    'mynulyi', 'минулий', 'ostannii', 'останній', 'bulo', 'було',
+    'zrobleno', 'зроблено', 'dopomozhit', 'допоможіть',
+    # English
+    'what', 'which', 'with', 'how', 'where', 'why', 'when', 'who',
 }
 
 MEDIA_DOMAIN_WORDS: set[str] = {
@@ -82,16 +113,40 @@ MUSIC_MEMORY_ALIASES: tuple[str, ...] = (
 )
 
 REVIEW_ONLY_TERMS: tuple[str, ...] = (
+    # Serbian / Croatian / Bosnian
     'review', 'pregled', 'recenz', 'verdikt', 'analiziraj', 'analiza',
-    'analyze', 'analysis', 'oceni', 'ocjena', 'ocena', 'rate', 'rating',
-    'score', 'šta fali', 'sta fali', 'šta još fali', 'sta jos fali',
+    'oceni', 'ocjena', 'ocena', 'šta fali', 'sta fali', 'šta još fali',
+    'sta jos fali',
+    # Russian
+    'prover', 'провер', 'otsen', 'оцен', 'analizirui', 'анализируй',
+    'analiz', 'анализ', 'retse', 'реце', 'verdikt', 'вердикт',
+    'chego ne khvataet', 'чего не хватает', 'chto dumaesh', 'что думаешь',
+    'kak tebe', 'как тебе', 'otsenka', 'оценка', 'smotri', 'смотри',
+    # Ukrainian
+    'perevis', 'перевір', 'otsiny', 'оціни', 'analizui', 'аналізуй',
+    'analiz', 'аналіз', 'retsenz', 'реценз', 'verdikt', 'вердикт',
+    'choho ne vystachaie', 'чого не вистачає', 'shcho dumaiesh', 'що думаєш',
+    'iak tobi', 'як тобі', 'otsinka', 'оцінка', 'dyvys', 'дивись',
+    # English
+    'analyze', 'analysis', 'rate', 'rating', 'score',
     'what is missing', 'what do you think',
 )
 
 CHANGE_INTENT_TERMS: tuple[str, ...] = (
+    # Serbian / Croatian / Bosnian
     'implement', 'patch', 'fix', 'sredi', 'poprav', 'change', 'promeni',
     'promijeni', 'dodaj', 'odradi', 'uradi posao', 'reši', 'resi', 'resolve',
     'apply', 'edit', 'update code',
+    # Russian
+    'isprav', 'исправ', 'poprav', 'sdelai', 'сделай', 'dobav', 'добав',
+    'izmeni', 'измени', 'pomeniai', 'поменяй', 'realizui', 'реализуй',
+    'vnedri', 'внедри', 'napishi', 'напиши', 'kod', 'код',
+    'primeni', 'примени', 'obnovi', 'обнови', 'zameni', 'замени',
+    # Ukrainian
+    'vyprav', 'виправ', 'zroby', 'зроби', 'dodai', 'додай',
+    'zminy', 'зміни', 'pominiai', 'поміняй', 'realizui', 'реалізуй',
+    'vprovad', 'впровадь', 'napyshy', 'напиши', 'kod', 'код',
+    'zastosui', 'застосуй', 'onovy', 'онови', 'zaminy', 'заміни',
 )
 
 # ---------------------------------------------------------------------------
@@ -125,16 +180,36 @@ SYNTHETIC_MEMORY_RE = re.compile(
 )
 
 CONTINUATION_QUERY_RE = re.compile(
+    # Serbian/Croatian/Bosnian
     r'\b(?:gde|gdje|đe|dje|dokle|where)\b.{0,80}\b(?:stali|stao|stala|ostali|došli|dosli|were|left|off)\b|'
     r'\b(?:šta|sta|što|sto|what)\b.{0,80}\b(?:rekao|rekla|rekli|told|radili|radimo|dogovorili)\b|'
-    r'\b(?:nastavi|continue|where\s+were\s+we|where\s+did\s+we\s+leave\s+off)\b',
+    r'\b(?:nastavi|continue|where\s+were\s+we|where\s+did\s+we\s+leave\s+off)\b|'
+    # Russian
+    r'\b(?:gde|где|kuda|куда|dokuda|докуда)\b.{0,80}\b(?:ostanovilis|остановились|ostalis|остались|byli|были)\b|'
+    r'\b(?:chto|что|chego|чего)\b.{0,80}\b(?:skazal|сказал|skazala|сказала|skazali|сказали|delali|делали|dogovorilis|договорились)\b|'
+    r'\b(?:prodolzhai|продолжай|prodolzai|davai dalshe|давай дальше|na chom ostanovilis|на чём остановились)\b|'
+    # Ukrainian
+    r'\b(?:de|де|kudy|куди|dokudy|докуди)\b.{0,80}\b(?:zupynylys|зупинились|zalyshylys|залишились|buly|були)\b|'
+    r'\b(?:shcho|що|choho|чого)\b.{0,80}\b(?:skazav|сказав|skazala|сказала|skazaly|сказали|robyly|робили|domovylys|домовились)\b|'
+    r'\b(?:prodovzhui|продовжуй|davai dali|давай далі|na chomu zupynylys|на чому зупинились)\b',
     re.IGNORECASE | re.DOTALL,
 )
 
 RUN_MARKER_RE = re.compile(r'\b(?:run|lbcap|codename)[-_][a-z0-9]+\b', re.IGNORECASE)
 
 DESTRUCTIVE_MEMORY_RE = re.compile(
-    r'\b(?:izbriši|izbrisi|obriši|obrisi|briši|brisi|delete|remove|rm)\b',
+    r'\b(?:'
+    # Serbian / Croatian / Bosnian
+    r'izbriši|izbrisi|obriši|obrisi|briši|brisi|'
+    # Russian
+    r'udali|удали|udali|удали|udalyat|удалять|ubrat|убрать|ubirai|убирай|'
+    r'sotri|сотри|steret|стереть|snesti|снести|'
+    # Ukrainian
+    r'vydaly|видали|vydaliaty|видаляти|prybraty|прибрати|'
+    r'zitry|зітри|sterty|стерти|znesty|знести|'
+    # English
+    r'delete|remove|rm'
+    r')\b',
     re.IGNORECASE,
 )
 
