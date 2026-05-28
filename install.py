@@ -1,292 +1,365 @@
 #!/usr/bin/env python3
-"""ATLANTIS Installer — Cross-platform install script for Hermes.
+"""ATLANTIS Installer / Updater — Cross-platform for Hermes.
 
-Works on Linux, macOS, and Windows. Requires Python 3.8+.
-Usage: python install.py
+Install:  python install.py [--auto]
+Update:   python install.py --update
+Status:   python install.py --status
+
+Installs live_brain, live_brain_ctx, nucleus, and prefill.json.
+Backs up existing plugins before overwriting.
 """
 import os
 import platform
 import re
 import shutil
+import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
+# ── Detection ──────────────────────────────────────────────────────────
+
 def hermes_home() -> Path:
-    """Detect HERMES_HOME across platforms."""
     env = os.environ.get("HERMES_HOME")
     if env:
         return Path(env)
-    home = Path.home()
-    # Windows: check AppData first, then fallback to ~/.hermes
     if platform.system() == "Windows":
         appdata = os.environ.get("APPDATA")
         if appdata:
             p = Path(appdata) / "hermes"
             if p.exists():
                 return p
-    return home / ".hermes"
+    return Path.home() / ".hermes"
 
 
-def find_atlantis_root() -> Path:
-    """Find ATLANTIS source root (directory containing this script)."""
+def atlantis_root() -> Path:
     return Path(__file__).resolve().parent
 
 
-def check_hermes(hh: Path) -> bool:
-    """Verify Hermes is installed."""
-    if not hh.exists():
-        print(f"✗ Hermes not found at {hh}")
-        print("  Set HERMES_HOME env var or install Hermes first.")
-        return False
-    plugins_dir = hh / "plugins"
-    if not plugins_dir.exists():
-        plugins_dir.mkdir(parents=True)
-    return True
+# ── Plugin operations ──────────────────────────────────────────────────
+
+PLUGINS = ("live_brain", "live_brain_ctx", "nucleus")
 
 
-def backup(plugins_dir: Path) -> None:
-    """Backup existing plugins if present."""
-    from datetime import datetime
+def backup_plugins(plugins_dir: Path) -> None:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_dir = plugins_dir.parent / "plugins_backup"
     backup_dir.mkdir(exist_ok=True)
-    for name in ("live_brain", "live_brain_ctx"):
+    for name in PLUGINS:
         src = plugins_dir / name
         if src.exists():
             dst = backup_dir / f"{name}_backup_{ts}"
             shutil.copytree(src, dst)
-            print(f"  ✓ Backed up {name} → {dst.name}")
+            print(f"  \u2713 Backed up {name} \u2192 {dst.name}")
 
 
 def install_plugin(src: Path, dst: Path, name: str) -> bool:
-    """Copy plugin directory, skipping __pycache__ and .pytest_cache."""
     if dst.exists():
         shutil.rmtree(dst)
-    def ignore(directory, files):
+    def _ignore(d, files):
         return [f for f in files if f in ("__pycache__", ".pytest_cache", ".git")]
-    shutil.copytree(src, dst, ignore=ignore)
-    # Verify key file exists
+    shutil.copytree(src, dst, ignore=_ignore)
     init = dst / "__init__.py"
     if not init.exists():
-        print(f"  ✗ {name}: __init__.py missing after copy!")
+        print(f"  \u2717 {name}: __init__.py missing after copy!")
         return False
-    print(f"  ✓ {name} installed ({sum(1 for _ in dst.rglob('*.py'))} .py files)")
+    py_count = sum(1 for _ in dst.rglob("*.py"))
+    print(f"  \u2713 {name} installed ({py_count} .py files)")
     return True
 
 
+def install_prefill(hh: Path, root: Path) -> None:
+    src = root / "prefill.json"
+    dst = hh / "prefill.json"
+    if not src.exists():
+        print("  \u26a0 prefill.json not found in repo, skipping")
+        return
+    if dst.exists():
+        backup = hh / f"prefill.json.bak.{datetime.now():%Y%m%d_%H%M%S}"
+        shutil.copy2(dst, backup)
+        print(f"  \u2139 Backed up existing prefill \u2192 {backup.name}")
+    shutil.copy2(src, dst)
+    print("  \u2713 prefill.json installed")
+
+
+# ── Dependencies ───────────────────────────────────────────────────────
+
 def install_deps(hh: Path, root: Path) -> None:
-    """Install Python dependencies into Hermes venv."""
-    import subprocess
-    req_file = root / "live_brain" / "requirements.txt"
-    if not req_file.exists():
-        print("  ⚠ requirements.txt not found, skipping")
+    req = root / "live_brain" / "requirements.txt"
+    if not req.exists():
+        print("  \u26a0 requirements.txt not found, skipping")
         return
 
-    # Find pip: hermes venv > system pip
-    venv_python = hh / "hermes-agent" / ".venv" / "bin" / "python"
-    if not venv_python.exists():
-        venv_python = hh / "hermes-agent" / "venv" / "bin" / "python"
-    if not venv_python.exists():
-        # Windows
-        venv_python = hh / "hermes-agent" / ".venv" / "Scripts" / "python.exe"
-    if not venv_python.exists():
-        print("  ⚠ Hermes venv not found, install manually:")
-        print(f"    pip install -r {req_file}")
+    python = None
+    for venv_name in (".venv", "venv"):
+        for sub in ("bin/python", "Scripts/python.exe"):
+            p = hh / "hermes-agent" / venv_name / sub
+            if p.exists():
+                python = p
+                break
+        if python:
+            break
+
+    if not python:
+        print("  \u26a0 Hermes venv not found, install manually:")
+        print(f"    pip install -r {req}")
         return
 
-    try:
-        result = subprocess.run(
-            [str(venv_python), "-m", "pip", "install", "-q", "-r", str(req_file)],
-            capture_output=True, text=True, timeout=60,
-        )
-        if result.returncode == 0:
-            print("  ✓ Dependencies installed (ddgs, tiktoken)")
-        else:
-            # Try uv fallback
-            result2 = subprocess.run(
-                ["uv", "pip", "install", "-q", "-r", str(req_file), "--python", str(venv_python)],
-                capture_output=True, text=True, timeout=60,
-            )
-            if result2.returncode == 0:
-                print("  ✓ Dependencies installed via uv (ddgs, tiktoken)")
-            else:
-                print(f"  ⚠ pip failed, install manually: {venv_python} -m pip install -r {req_file}")
-    except Exception as e:
-        print(f"  ⚠ Could not install deps: {e}")
-        print(f"    Install manually: pip install -r {req_file}")
+    for tool in ("pip", "uv"):
+        cmd = [str(python), "-m", tool, "install", "-q", "-r", str(req)]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+            if r.returncode == 0:
+                print(f"  \u2713 Dependencies installed via {tool}")
+                return
+        except Exception:
+            continue
+    print(f"  \u26a0 Could not auto-install deps. Run: {python} -m pip install -r {req}")
 
 
-def verify_import(plugins_dir: Path) -> bool:
-    """Quick import check."""
-    sys.path.insert(0, str(plugins_dir))
-    try:
-        import importlib
-        mod = importlib.import_module("live_brain_ctx.modules.cognitive_architecture")
-        assert hasattr(mod, "get_cognitive_context")
-        print("  ✓ cognitive_architecture imports OK")
-        return True
-    except Exception as e:
-        print(f"  ⚠ Import check failed: {e}")
-        print("    (Plugin will still work if Hermes loads it correctly)")
-        return True  # non-fatal
-    finally:
-        sys.path.pop(0)
+# ── Config patching ────────────────────────────────────────────────────
 
+CONFIG_BLOCK = """\
+plugins:
+  enabled:
+    - live_brain
+    - live_brain_ctx
+    - nucleus
 
-CONFIG_REQUIRED = {
-    "memory_engine": "live_brain",
-    "context_engine": "live_brain_ctx",
-    "plugins": ["live_brain", "live_brain_ctx"],
-}
-
-CONFIG_SNIPPET = """\
-# --- ATLANTIS configuration (add to your config.yaml) ---
 memory:
-  engine: live_brain
+  provider: live_brain
 
 context:
   engine: live_brain_ctx
 
-plugins:
-  - live_brain
-  - live_brain_ctx
+agent:
+  prefill_messages_file: prefill.json
+
+tool_loop_guardrails:
+  hard_stop_enabled: true
+  hard_stop_after:
+    exact_failure: 3
+    same_tool_failure: 5
 """
 
 
-def configure_hermes(hh: Path, auto: bool) -> None:
-    """Check and optionally patch config.yaml."""
+def patch_config(hh: Path, auto: bool) -> None:
     config_path = hh / "config.yaml"
     if not config_path.exists():
-        print(f"  ⚠ config.yaml not found at {config_path}")
-        print(f"    Create it manually with:\n{CONFIG_SNIPPET}")
+        print(f"  \u26a0 config.yaml not found at {config_path}")
+        print(f"  Add this block:\n{CONFIG_BLOCK}")
         return
 
     content = config_path.read_text(encoding="utf-8")
-    needs_memory = "engine: live_brain" not in content
-    needs_ctx = "engine: live_brain_ctx" not in content
-    needs_plugin_lb = not re.search(r'-\s+live_brain\s*$', content, re.MULTILINE)
-    needs_plugin_ctx = "- live_brain_ctx" not in content
+    needed = []
 
-    if not any([needs_memory, needs_ctx, needs_plugin_lb, needs_plugin_ctx]):
-        print("  ✓ config.yaml already configured for ATLANTIS")
+    if "provider: live_brain" not in content:
+        needed.append("memory.provider: live_brain")
+    if "engine: live_brain_ctx" not in content:
+        needed.append("context.engine: live_brain_ctx")
+    if "- nucleus" not in content:
+        needed.append("plugins: - nucleus")
+    if "prefill_messages_file: prefill.json" not in content:
+        needed.append("agent.prefill_messages_file: prefill.json")
+    if "hard_stop_enabled: true" not in content:
+        needed.append("tool_loop_guardrails.hard_stop_enabled: true")
+
+    if not needed:
+        print("  \u2713 config.yaml already configured")
         return
-
-    missing = []
-    if needs_memory:
-        missing.append("memory.engine: live_brain")
-    if needs_ctx:
-        missing.append("context.engine: live_brain_ctx")
-    if needs_plugin_lb:
-        missing.append("plugins: - live_brain")
-    if needs_plugin_ctx:
-        missing.append("plugins: - live_brain_ctx")
 
     if not auto:
-        print(f"  ⚠ config.yaml missing: {', '.join(missing)}")
-        print(f"    Add the following to {config_path}:\n")
-        print(CONFIG_SNIPPET)
+        print(f"  \u26a0 config.yaml needs: {', '.join(needed)}")
+        print(f"  Add this block:\n{CONFIG_BLOCK}")
         return
 
-    # Auto-patch: append missing entries
-    patches = []
-    if needs_memory:
-        if "memory:" in content:
-            content = content.replace("memory:", "memory:\n  engine: live_brain", 1)
-        else:
-            patches.append("\nmemory:\n  engine: live_brain\n")
-    if needs_ctx:
-        if "context:" in content:
-            # Insert engine line after context:
-            content = content.replace("context:", "context:\n  engine: live_brain_ctx", 1)
-        else:
-            patches.append("\ncontext:\n  engine: live_brain_ctx\n")
-    if needs_plugin_lb or needs_plugin_ctx:
-        if "plugins:" not in content:
-            patches.append("\nplugins:\n  enabled:\n  - live_brain\n  - live_brain_ctx\n")
-        else:
-            if needs_plugin_lb:
-                content = content.replace("- live_brain_ctx", "- live_brain\n  - live_brain_ctx", 1)
-            if needs_plugin_ctx:
-                if "- live_brain_ctx" not in content:
-                    content = content.replace("- live_brain", "- live_brain\n  - live_brain_ctx", 1)
+    # Auto-patch
+    lines = content.split("\n")
+    out = list(lines)
 
-    content += "".join(patches)
-    config_path.write_text(content, encoding="utf-8")
-    print(f"  ✓ config.yaml patched: {', '.join(missing)}")
+    if "memory:" in content and "provider: live_brain" not in content:
+        out = _patch_section(out, "memory:", "  provider: live_brain")
+    if "context:" in content and "engine: live_brain_ctx" not in content:
+        out = _patch_section(out, "context:", "  engine: live_brain_ctx")
+    if "- nucleus" not in content:
+        out = _patch_plugin(out, "nucleus")
+    if "prefill_messages_file:" not in content:
+        out = _patch_section(out, "agent:", "  prefill_messages_file: prefill.json")
+    if "hard_stop_enabled: true" not in content:
+        out = _patch_section(out, "tool_loop_guardrails:", "  hard_stop_enabled: true")
 
+    config_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+    print(f"  \u2713 config.yaml patched: {', '.join(needed)}")
+
+
+def _patch_section(lines, header, entry):
+    out = []
+    for i, line in enumerate(lines):
+        out.append(line)
+        if line.strip().startswith(header.rstrip(":")):
+            out.append(entry)
+    return out
+
+
+def _patch_plugin(lines, plugin_name):
+    out = []
+    in_enabled = False
+    for line in lines:
+        if line.strip() == "enabled:" and not in_enabled:
+            in_enabled = True
+        elif in_enabled and line.strip().startswith("- ") and plugin_name not in line:
+            out.append(f"  - {plugin_name}")
+            in_enabled = False
+        out.append(line)
+    if in_enabled:
+        out.append(f"    - {plugin_name}")
+    return out
+
+
+# ── Status ─────────────────────────────────────────────────────────────
+
+def show_status(hh: Path) -> None:
+    plugins_dir = hh / "plugins"
+    config_path = hh / "config.yaml"
+    prefill_path = hh / "prefill.json"
+    lb_db = hh / "live_brain" / "live_brain.db"
+
+    print("ATLANTIS Status")
+    print("=" * 44)
+
+    for name in PLUGINS:
+        init = plugins_dir / name / "__init__.py"
+        if init.exists():
+            size = init.stat().st_size
+            print(f"  \u2713 {name:20s}  installed ({size:,} bytes)")
+        else:
+            print(f"  \u2717 {name:20s}  NOT installed")
+
+    if prefill_path.exists():
+        print(f"  \u2713 prefill.json          installed")
+    else:
+        print(f"  \u2717 prefill.json          NOT installed")
+
+    if config_path.exists():
+        content = config_path.read_text()
+        has_lb = "provider: live_brain" in content
+        has_ctx = "engine: live_brain_ctx" in content
+        has_nuc = "- nucleus" in content
+        has_pf = "prefill_messages_file:" in content
+        print(f"  {'\u2713' if has_lb else '\u2717'} config: memory.provider = live_brain")
+        print(f"  {'\u2713' if has_ctx else '\u2717'} config: context.engine = live_brain_ctx")
+        print(f"  {'\u2713' if has_nuc else '\u2717'} config: plugins includes nucleus")
+        print(f"  {'\u2713' if has_pf else '\u2717'} config: agent.prefill_messages_file")
+    else:
+        print("  \u2717 config.yaml not found")
+
+    if lb_db.exists():
+        print(f"  \u2713 live_brain.db         {lb_db.stat().st_size:,} bytes")
+    else:
+        print(f"  \u26a0 live_brain.db         not yet created (first session will create it)")
+
+
+# ── Update ─────────────────────────────────────────────────────────────
+
+def update_from_repo(root: Path) -> bool:
+    """Git pull the latest ATLANTIS code."""
+    if not (root / ".git").exists():
+        print("  \u26a0 Not a git repo — can't auto-update")
+        return False
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(root), "pull", "origin", "main"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode == 0:
+            print("  \u2713 Repo updated: " + r.stdout.strip().split("\n")[-1])
+            return True
+        else:
+            print(f"  \u2717 Git pull failed: {r.stderr.strip()}")
+            return False
+    except Exception as e:
+        print(f"  \u2717 Git pull error: {e}")
+        return False
+
+
+# ── Main ───────────────────────────────────────────────────────────────
 
 def main():
-    print("╔══════════════════════════════════════════╗")
-    print("║   ATLANTIS Installer for Hermes         ║")
-    print("║   Cognitive Architecture + Live Brain   ║")
-    print("╚══════════════════════════════════════════╝")
+    args = set(sys.argv[1:])
+
+    if "--status" in args or "-s" in args:
+        show_status(hermes_home())
+        return
+
+    print("\u2554" + "\u2550" * 42 + "\u2557")
+    print("\u2551   ATLANTIS — Agent Intelligence System    \u2551")
+    print("\u2551   live_brain + live_brain_ctx + nucleus   \u2551")
+    print("\u255a" + "\u2550" * 42 + "\u255d")
     print()
 
-    # Parse --auto flag (skip interactive prompt)
-    root = find_atlantis_root()
+    root = atlantis_root()
     hh = hermes_home()
+    auto = "--auto" in args
+    do_update = "--update" in args
 
-    print(f"[1/7] Detecting Hermes at: {hh}")
-    if not check_hermes(hh):
+    if do_update:
+        print("[update] Pulling latest ATLANTIS...")
+        update_from_repo(root)
+        print()
+
+    print(f"[1/7] Hermes at: {hh}")
+    if not hh.exists():
+        print(f"  \u2717 Not found. Set HERMES_HOME or install Hermes first.")
         sys.exit(1)
-    print(f"  ✓ Hermes found")
+    print("  \u2713 Found")
     print()
 
     plugins_dir = hh / "plugins"
+    plugins_dir.mkdir(parents=True, exist_ok=True)
 
     print("[2/7] Backing up existing plugins...")
-    backup(plugins_dir)
+    backup_plugins(plugins_dir)
     print()
 
-    print("[3/7] Installing live_brain...")
-    lb_src = root / "live_brain"
-    if not lb_src.exists():
-        print(f"  ✗ Source not found: {lb_src}")
-        sys.exit(1)
-    install_plugin(lb_src, plugins_dir / "live_brain", "live_brain")
+    for i, name in enumerate(PLUGINS, 3):
+        print(f"[{i}/7] Installing {name}...")
+        src = root / name
+        if not src.exists():
+            print(f"  \u2717 Source not found: {src}")
+            continue
+        install_plugin(src, plugins_dir / name, name)
+        print()
+
+    i = 6
+    print(f"[{i}/7] Installing prefill...")
+    install_prefill(hh, root)
     print()
 
-    print("[4/7] Installing live_brain_ctx...")
-    ctx_src = root / "live_brain_ctx"
-    if not ctx_src.exists():
-        print(f"  ✗ Source not found: {ctx_src}")
-        sys.exit(1)
-    install_plugin(ctx_src, plugins_dir / "live_brain_ctx", "live_brain_ctx")
-    print()
-
-    print("[5/7] Installing dependencies...")
+    i = 7
+    print(f"[{i}/7] Installing dependencies...")
     install_deps(hh, root)
     print()
 
-    print("[6/7] Configuring Hermes...")
-    if "--auto" in sys.argv:
-        auto_config = True
+    print("[config] Configuring Hermes...")
+    patch_config(hh, auto=auto)
+    print()
+
+    print("\u2550" * 44)
+    print("\u2713 ATLANTIS installed!")
+    print()
+    if do_update:
+        print("  Restart your Hermes gateway to apply:")
+        print("    systemctl --user restart hermes-gateway")
     else:
-        print("  How to configure config.yaml?")
-        print("    1) Show me what to add (manual)")
-        print("    2) Auto-patch config.yaml")
-        choice = input("  Choose [1/2]: ").strip()
-        auto_config = choice == "2"
-    configure_hermes(hh, auto=auto_config)
+        print("  Next steps:")
+        print("    1. Restart Hermes gateway")
+        print("    2. Start a /new session for clean state")
+        print("    3. Test with a complex multi-step task")
     print()
-
-    print("[7/7] Verifying installation...")
-    verify_import(plugins_dir)
+    print(f"  python install.py --status   \u2192 check installation")
+    print(f"  python install.py --update   \u2192 pull + reinstall latest")
     print()
-
-    print("═" * 44)
-    print("✓ ATLANTIS installed successfully!")
-    print()
-    print("Usage:")
-    print("  python install.py        → install + show config instructions")
-    print("  python install.py --auto → install + auto-patch config.yaml")
-    print()
-    print("Next steps:")
-    print("  1. Restart Hermes gateway")
-    print("  2. Send a complex query to test cognitive architecture")
-    print()
-    print(f"Installed to: {plugins_dir}")
 
 
 if __name__ == "__main__":

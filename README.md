@@ -1,217 +1,267 @@
-# ATLANTIS Memory System
+# ATLANTIS — Complete Agent Intelligence System for Hermes
 
-**Production-grade memory plugin for long-running AI agents.**
+**Makes weak LLMs deliver expert results. No embeddings. No vectors. Pure operational truth.**
 
-ATLANTIS is a complete operational state management system that gives AI agents true situational awareness, causal reasoning, and the ability to maintain operational truth across sessions. It is deterministic (no embeddings, no vectors for retrieval), auditable, and self-evolving.
-
-## Architecture
+ATLANTIS turns any LLM — including cheap models like MiniMax-M2.7 — into a
+stateful, self-aware agent that remembers what it's doing, retrieves only
+relevant context, and stops itself before looping. It's the difference between
+"what were we doing?" and "I already fixed that, here's the next step."
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│ Hermes Gateway                                                   │
-├──────────────────────────┬──────────────────────────────────────┤
-│ live_brain (provider)    │ live_brain_ctx (context engine)       │
-│ 15 brain_* tools         │ 4 hooks: pre/post LLM + tool         │
-│ MemoryProvider interface │ Context injection + recording         │
-├──────────────────────────┴──────────────────────────────────────┤
-│ SQLite (WAL) — ~/.hermes/live_brain/live_brain.db               │
-│ 8 migrations │ 60+ tables │ FTS5 search │ Audit trail           │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                        ATLANTIS Stack                                │
+├───────────────┬──────────────────┬───────────────────────────────────┤
+│  live_brain   │  live_brain_ctx  │  nucleus                          │
+│  (provider)   │  (context engine)│  (guard + stuck detector)         │
+│  15 brain_*   │  5 hooks         │  3 hooks + bridge                 │
+│  tools        │  assembler       │  contributions                    │
+├───────────────┴──────────────────┴───────────────────────────────────┤
+│  SQLite (WAL) — ~/.hermes/live_brain/live_brain.db                  │
+│  8 migrations │ 60+ tables │ FTS5 │ Causal beliefs │ Fix recipes     │
+├──────────────────────────────────────────────────────────────────────┤
+│  prefill.json — forces THINK:/KNOW:/ACT: response structure          │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
-## Core Capabilities
+## What Makes ATLANTIS Different
 
-| Layer | What it does |
+| Every other memory system | ATLANTIS |
 |---|---|
-| **Cognitive Architecture** | Tiered reasoning (decompose → verify → synthesize → adversarial attack → final). Anti-downgrade with constraint propagation. Cross-domain synthesis. |
-| **Reality Engine** | Maintains current operational state: objectives, open loops, blockers, danger zones, action constraints |
-| **Epistemic Autonomy** | Current/high-stakes questions require fresh authoritative sources; blocks stale session_search |
-| **Causal Reasoning** | Beliefs have lifecycle (hypothesis → validated/falsified/ruled_out); cascading invalidation |
-| **Self-Evolution** | Gated proposals for code/config/schema changes; approval queue with risk scoring |
-| **Verified Artifacts** | Project files selected by verified role/status, not filename similarity |
-| **Entity Graph** | Connected knowledge with relationship traversal and cross-entity synthesis |
-| **Dialectic Reasoning** | Cross-session synthesis tracking belief evolution and contradictions |
-| **Context Fencing** | Prevents memory pollution from self-referential operations and noise |
-| **User Alignment** | Automatically tracks preferences, communication patterns, feedback |
-| **Deterministic Retrieval** | Keyword/rule-based scoring with domain conflict detection — no embeddings |
+| Dumps raw chat history into context | **Lane-gated injection** — chit_chat gets 0 bytes, deep_execution gets 5KB of relevant state |
+| Vector DB with noisy semantic matches | **Deterministic scoring** — keyword, domain, marker, causal — no embeddings |
+| LLM loops forever on failures | **Stuck detector** — 3+ same-tool failures forces escape prompt at priority 2 |
+| Shows all 100 tools to a weak model | **Lane-gated tools** — 3-6 tools per turn lane, not all 14 |
+| Raw JSON tool results drown the LLM | **1-line summaries** — `[brain_recall: 3 matches. Top: project enoch config...]` |
+| "Please think step by step" (ignored) | **Forced prefill** — LLM output starts with `THINK:` in the buffer, can't skip it |
+| Chit-chat revives dead objectives | **Intent classification** — greetings get zero context, no stale state leakage |
 
-## Why ATLANTIS Is Better For Operational Agents
+## Plugin Architecture
 
-ATLANTIS is not "better than every memory system" in every use case. It is
-stronger than generic memory stacks when the agent must preserve operational
-truth, stay scoped to the current task, and explain why a context fragment was
-surfaced.
+### `live_brain/` — Memory Provider
+15 brain tools the LLM can actively query. Episodic, causal, factual, and
+artifact memory with typed retrieval and belief lifecycle management.
 
-| Generic memory pattern | Common failure mode | ATLANTIS behavior |
-|---|---|---|
-| **Vector / embedding memory** | Semantically similar but operationally wrong recall | Deterministic scope, rules, beliefs, artifacts, and active-task state win before any broad recall |
-| **Chat-history summarizer** | Good recap, weak execution continuity | Stores verified artifacts, open bugs, next required action, approvals, and causal belief state |
-| **Generic RAG memory** | Retrieves text snippets but does not model what is currently true | Tracks mutable operational truth through reality state, belief lifecycle, and audit trail |
-| **Workflow state tracker** | Knows status outside the prompt, but the model still answers from stale context | Injects scoped state directly into the pre-LLM context and records post-turn outcomes back into the DB |
+### `live_brain_ctx/` — Context Engine
+The central pipeline. Classifies intent, loads relevant state, assembles
+context with byte budgets, cross-turn dedup, and lane-gated priority dropping.
+Runs as `pre_llm_call` hook — injects context BEFORE the LLM sees the prompt.
 
-In short: ATLANTIS is optimized for long-running operational agents, not for
-generic semantic search or "remember my conversations" demos.
+### `nucleus/` — Guard & Stuck Detector
+Intervention engine catches mistake patterns before tool execution (patch
+without reading, write without backup). Stuck detector forces escape when
+3+ same-tool failures. Contributions injected via bridge at priority 2-5.
 
-## Plugin Structure
+### `prefill.json` — Forced Response Structure
+The LLM's output buffer starts with `THINK: [analyze]\nKNOW: [context]\nACT:`.
+Weak LLMs can't ignore their own output stream.
 
-### `live_brain/` — Memory Provider (39 files, ~4500 LOC)
-
-```
-live_brain/
-├── __init__.py           (866 lines — provider + 15 handler methods)
-├── store.py              (1325 — LiveBrainStore + LockedConnection)
-├── schema_manager.py     (graceful migration runner with FAILED tracking)
-├── connection_pool.py    (thread-safe pool with lifecycle tracking)
-├── ingest.py             (turn ingestion + entity/fact/belief extraction)
-├── retrieval.py          (token-budgeted briefing builder)
-├── reality.py            (reality engine — events, state, open loops)
-├── epistemic.py          (autonomous research layer)
-├── causal.py             (belief marking + cascading invalidation)
-├── evolution.py          (self-evolution proposals + risk scoring)
-├── entity_graph.py       (relationship graph traversal)
-├── dialectic.py          (cross-session synthesis)
-├── user_alignment.py     (preference/pattern tracking)
-├── artifacts.py          (verified artifact registry)
-├── rules.py              (binding constraint engine)
-├── briefing.py           (compression + canonical recaps)
-├── research.py           (bounded research planning)
-├── hermes_adapter.py     (standalone testing interface)
-├── backup_manager.py     (online SQLite backup)
-├── maintenance_manager.py (scheduled hygiene)
-├── migrations/           (000-006 SQL migrations)
-├── tests/                (7 test files, 47 assertions)
-└── requirements.txt      (ddgs, tiktoken)
-```
-
-### `live_brain_ctx/` — Context Engine (21 files, ~4100 LOC)
-
-```
-live_brain_ctx/
-├── __init__.py           (~240 lines — thin facade + register)
-├── modules/
-│   ├── cognitive_architecture.py (tiered reasoning + ruled_out + cross-domain)
-│   ├── state.py          (constants + regex patterns)
-│   ├── hooks.py          (4 hook functions + orchestration)
-│   ├── scoring.py        (overlap/domain/marker scoring)
-│   ├── formatting.py     (section formatting)
-│   ├── integrations.py   (reality + epistemic engine bridges)
-│   ├── data_sources.py   (DB fetch + maintenance)
-│   ├── query_filters.py  (classification + filtering)
-│   ├── approval.py       (pending approval management)
-│   ├── tool_context.py   (tool hints + recipe formatting)
-│   ├── tag_matching.py   (scope tag matching)
-│   ├── text_processing.py (redaction + noise detection)
-│   ├── query_classification.py
-│   ├── assembler.py      (P2.1/P4.2 lane-aware byte-budget assembler)
-│   ├── bridge.py         (P3.2 cross-plugin shared state — scopes + pending_changes)
-│   └── memory_compress.py (P2.5 MemoryStore snapshot dedup, containment-ratio single-link)
-├── tests/                (6 test files including golden snapshots)
-│   └── golden/           (6 lane snapshots for drift detection)
-└── context_config.json
-```
-
-## Tools Registered (15)
-
-| Tool | Purpose |
-|---|---|
-| `brain_state_debug` | Inspect work_state |
-| `brain_reality_debug` | Reality engine state + action gate |
-| `brain_recap` | Summarize recent work |
-| `brain_mark_belief` | Create/update causal beliefs |
-| `brain_recall` | Natural language query |
-| `brain_research` | Bounded research planning |
-| `brain_epistemic` | Autonomous web research |
-| `brain_resolve_artifact` | Resolve verified artifact path |
-| `brain_mark_artifact` | Register/deprecate artifacts |
-| `brain_list_artifacts` | List project artifacts |
-| `brain_self_evolution` | Propose/list/decide evolution proposals |
-| `brain_entity_graph` | Traverse entity relationships |
-| `brain_synthesize` | Cross-session dialectic synthesis |
-| `brain_user_profile` | View/update user preferences |
-| `brain_compose_query` | Algebraic queries (A + B − C) |
-
-## Installation
+## Quick Install
 
 ```bash
 git clone https://github.com/PreviousGod/ATLANTIS.git
 cd ATLANTIS
-python install.py
+python install.py --auto
 ```
 
-The installer will:
-1. Detect your Hermes installation (Linux/macOS/Windows)
-2. Backup existing plugins
-3. Install `live_brain` + `live_brain_ctx`
-4. Ask how to configure (manual instructions or auto-patch config.yaml)
-5. Verify imports
+The installer detects your Hermes installation, backs up existing plugins,
+installs all three plugins + prefill, patches config.yaml, and installs deps.
 
-Use `python install.py --auto` to skip the interactive prompt.
+After install, restart your Hermes gateway:
+```bash
+systemctl --user restart hermes-gateway
+# or just restart hermes from CLI
+```
 
-## Testing
+## Update
 
 ```bash
-# Full preflight (compile + import + migration dry-run + tests)
-bash scripts/plugins_preflight.sh
-
-# Individual test suites
-python tests/live_brain_smoke.py
-python live_brain/tests/test_store_integration.py
-python live_brain_ctx/tests/test_hook_dispatch.py
-python live_brain_ctx/tests/test_scoring.py
-python live_brain_ctx/tests/test_cross_platform.py
+python install.py --update     # pull latest from repo + reinstall
 ```
 
-## Production Stats (2026-05-11)
+Or after install, you can also run:
+```bash
+livebrain update               # if the CLI tool is on PATH
+```
 
-- **74 automated tests**, all passing
-- **8 schema migrations** applied (audit_spine_v1, 000-006)
-- **481 sessions**, 1340 turns, 889 episodes, 641 facts, 236 beliefs
-- **49 self-evolution proposals** (12 approved, 14 rejected, 22 expired, 1 pending)
-- **Preflight guard** catches SyntaxError/import/migration failures in <2s
+## The Smartness Layer
+
+### Forced Prefill
+```json
+[{"role": "assistant", "content": "THINK: [Analyze request against context]\nKNOW: [What's relevant]\nACT:"}]
+```
+The LLM's first token is already written. It MUST complete the thought.
+
+### Lane-Gated Tools
+| Turn lane | Tools visible | Why |
+|---|---|---|
+| `chit_chat` | 0 brain tools | No memory pollution on "hello" |
+| `simple_execution` | 6 tools | recap, recall, reality, artifacts |
+| `deep_execution` | 10 tools | full reasoning + entity graph |
+| `research_or_epistemic` | 6 tools | epistemic, research, compose, entity |
+| `continuation_or_resume` | 5 tools | recap, recall, reality, beliefs |
+| `document_intake` | 3 tools | artifacts only |
+
+### Tool Result Compression
+Every brain tool result gets a 1-line summary before raw JSON:
+```
+[brain_recap: 3 recent work items]
+{"recap": [...]}
+```
+
+### Turn Economy Warnings
+- 3 turns: "Be efficient"
+- 8 turns: "You may be stuck — STOP and explain"
+- 15 turns: "CRITICAL — STOP ALL TOOL CALLS IMMEDIATELY"
+
+### Stuck Detector
+When 3+ consecutive same-tool failures detected, NUCLEUS STUCK injects at priority 2:
+```
+NUCLEUS STUCK DETECTED:
+- 5 consecutive failures of tool 'terminal'
+- STOP all tool calls IMMEDIATELY
+- Do NOT retry 'terminal' — it will fail again
+- Tell the user what went wrong
+```
+
+### Circuit Breakers
+After 3 exact same failures or 5 same-tool failures, tool calls are **physically blocked**.
+
+## Full Tool List
+
+| Tool | Purpose |
+|---|---|
+| `brain_recap` | Summarize recent work |
+| `brain_recall` | Natural language memory query |
+| `brain_reality_debug` | Active objectives, open loops, constraints |
+| `brain_mark_belief` | Create/update causal beliefs |
+| `brain_list_artifacts` | List verified project files |
+| `brain_mark_artifact` | Register/deprecate project artifacts |
+| `brain_resolve_artifact` | Resolve artifact path by project+role |
+| `brain_epistemic` | Autonomous web research (current facts) |
+| `brain_research` | Bounded research planning |
+| `brain_entity_graph` | Traverse entity relationships |
+| `brain_synthesize` | Cross-session dialectic synthesis |
+| `brain_user_profile` | View/update user preferences |
+| `brain_compose_query` | Algebraic queries (A + B - C) |
+| `brain_self_evolution` | Propose/approve/reject code changes |
+| `brain_state_debug` | Inspect work_state (debug, gated) |
+
+## Directory Structure
+
+```
+ATLANTIS/
+├── live_brain/               Memory provider (15 brain_* tools)
+│   ├── __init__.py            Provider + lane-gating + tool summaries
+│   ├── store.py               SQLite store with connection pooling
+│   ├── ingest.py              Turn ingestion + entity extraction
+│   ├── retrieval.py           Token-budgeted briefing builder
+│   ├── reality.py             Reality engine (objectives, loops, gates)
+│   ├── epistemic.py           Autonomous research layer
+│   ├── causal.py              Belief lifecycle management
+│   ├── evolution.py           Self-evolution proposals
+│   ├── entity_graph.py        Relationship graph traversal
+│   ├── dialectic.py           Cross-session synthesis
+│   ├── artifacts.py           Verified artifact registry
+│   ├── rules.py               Binding constraint engine
+│   ├── briefing.py            Compression + canonical recaps
+│   ├── research.py            Bounded research planning
+│   ├── schema_manager.py      Migration runner
+│   ├── connection_pool.py     Thread-safe DB pool
+│   ├── backup_manager.py      Online SQLite backup
+│   ├── maintenance_manager.py Scheduled hygiene
+│   ├── migrations/            000-008 SQL migrations
+│   └── tests/                 10 test files
+│
+├── live_brain_ctx/            Context engine (5 hooks)
+│   ├── __init__.py            Thin facade + register
+│   ├── modules/
+│   │   ├── hooks.py           4 hook functions + turn economy
+│   │   ├── assembler.py       Byte-budget assembler + dedup
+│   │   ├── bridge.py          Cross-plugin shared state
+│   │   ├── cognitive_architecture.py  Tiered reasoning
+│   │   ├── scoring.py         Overlap/domain/marker scoring
+│   │   ├── formatting.py      Section formatting
+│   │   ├── integrations.py    Reality + epistemic bridges
+│   │   ├── query_filters.py   Intent classification
+│   │   └── ...
+│   ├── tests/                 6 test files + golden snapshots
+│   └── context_config.json    Lane budgets + section priorities
+│
+├── nucleus/                   Guard + stuck detector
+│   ├── __init__.py            Hooks + monkey-patch + bridge registration
+│   ├── nucleus_engine.py      Core (heartbeat removed, pargod kept)
+│   ├── contributions.py       Bridge contributions + stuck detector
+│   ├── intervention.py        Mistake pattern detection
+│   ├── session_state.py       Thread-safe runtime state
+│   ├── pargod.py              Graph-based resolution
+│   ├── config.py              All thresholds + paths
+│   └── ...
+│
+├── install.py                 Cross-platform installer
+├── livebrain                  CLI tool (install/update/status)
+├── prefill.json               Forced THINK:/KNOW:/ACT: structure
+├── requirements.txt           Python dependencies
+└── scripts/
+    └── plugins_preflight.sh   Compile + import + migration check
+```
+
+## Config Reference
+
+Add to `~/.hermes/config.yaml`:
+
+```yaml
+plugins:
+  enabled:
+    - live_brain
+    - live_brain_ctx
+    - nucleus
+
+memory:
+  provider: live_brain
+
+context:
+  engine: live_brain_ctx
+
+agent:
+  prefill_messages_file: prefill.json
+
+tool_loop_guardrails:
+  hard_stop_enabled: true
+  hard_stop_after:
+    exact_failure: 3
+    same_tool_failure: 5
+```
 
 ## Design Philosophy
 
-1. **Deterministic over probabilistic** — keyword/rule scoring, not embeddings
-2. **Auditable** — every mutation has before/after revision + audit_log entry
-3. **Graceful degradation** — broken migration doesn't crash provider; missing JSON doesn't crash import
-4. **Bounded concurrency** — ThreadPoolExecutor(max_workers=2) for sync, 1 for maintenance
-5. **Platform-agnostic** — scope keys parameterized by platform (telegram/discord/slack/cli/web)
+1. **Constraints over suggestions** — weak LLMs ignore "please think carefully" but can't ignore their own output stream (prefill) or a blocked tool call (circuit breaker)
+2. **Less is more** — 3 tools visible, not 14. 500 bytes of right context beats 5000 bytes of noise
+3. **Deterministic retrieval** — keyword/rule scoring, not embeddings. Auditable, debuggable.
+4. **Graceful degradation** — broken migration doesn't crash provider; missing JSON doesn't crash import
+5. **Defense in depth** — stuck detector + turn economy + circuit breakers + hard stops. Multiple layers catch what one misses.
 
 ## Changelog
 
-- **2026-05-17** — intent-gated context injection:
-  - Added intent classification for `chit_chat`, `continuity_recap`,
-    `task_execution`, `local_repo_lookup`, and `approval_flow`
-  - Centralized section allowlists and section budgets in `live_brain_ctx`
-  - Prevented greetings and vague follow-ups from reviving stale operational state
-  - Kept repo/file lookups factual instead of leaking active tasks and next actions
-  - Added regression tests for greeting suppression, recap routing, approval-only
-    prompts, and repo lookup behavior
-  - Extended artifact lookup for manifest-style queries such as `plugin.yaml`
-    and `manifest`
+### 2026-05-28 — Smartness Layer
+- Lane-gated tool visibility (3-6 tools per turn lane)
+- Tool result compression (1-line summaries before raw JSON)
+- Turn economy section (escalating warnings at 3/8/15 turns)
+- Nucleus stuck detector (3+ same-tool failures → priority 2 escape prompt)
+- Nucleus heartbeat removed (hooks + bridge provide all value)
+- Pargod schema fix (use_count + last_used columns)
+- Hook exception handling (try/except on all hooks)
+- Forced prefill (THINK:/KNOW:/ACT:)
+- Circuit breakers enabled (hard_stop_enabled: true)
 
-- **2026-05-11** — ATLANTIS Cognitive Architecture:
-  - Tiered reasoning (Tier 1/2/3) with zero overhead for trivial queries
-  - Multi-perspective decomposition (structural/causal/temporal/analogical)
-  - Adversarial self-attack before delivering answers
-  - Confidence gate (forces research when <2 verified facts)
-  - Anti-downgrade: ruled_out state with constraint propagation across turns
-  - Cross-domain synthesis via SQLite (0 extra LLM calls)
-  - Cross-platform install script (`python install.py`)
+### 2026-05-17 — Intent-Gated Context
+- Intent classification for chit_chat, continuity_recap, task_execution
+- Centralized section allowlists and budgets
+- Greetings and vague follow-ups no longer revive stale state
 
-- **2026-05-11** — Production-readiness pass + external review remediation:
-  - Migration 006 FTS5 fix (reserved `rowid` column)
-  - Graceful migration runner (FAILED tracking, no restart loops)
-  - Full ctx modularization (2221 → 235 line facade + 12 modules)
-  - Handler map dispatch (replaced 300-line if-elif)
-  - ConnectionPool lifecycle fix (thread-local + close_all)
-  - Background DB maintenance (non-blocking)
-  - Batched self-evolution expiry (~66% fewer DB hits)
-  - Cross-platform scope keys (telegram/discord/slack/cli/web)
-  - Import caching for dynamic class loading
-  - `ddgs` package migration (from deprecated `duckduckgo_search`)
-  - 74 automated tests across 10 test files
-  - Preflight guard script
+### 2026-05-11 — Cognitive Architecture
+- Tiered reasoning (Tier 1/2/3) with zero overhead for trivial queries
+- Adversarial self-attack before delivering answers
+- Anti-downgrade: ruled_out state with constraint propagation
 
 ## License
 

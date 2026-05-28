@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""livebrain — CLI tool for ATLANTIS management.
+
+Usage:
+  livebrain install      Install ATLANTIS plugins into Hermes
+  livebrain update       Pull latest from GitHub + reinstall
+  livebrain status       Show installation status
+  livebrain --help       Show this help
+
+Install this script somewhere on PATH:
+  sudo cp livebrain /usr/local/bin/
+  # or: ln -s $(pwd)/livebrain ~/.local/bin/livebrain
+"""
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+def find_install_script() -> Path | None:
+    """Find install.py — check same dir, then search common locations."""
+    candidates = [
+        Path(__file__).resolve().parent / "install.py",
+        Path.home() / "ATLANTIS" / "install.py",
+        Path.home() / "atlantis" / "install.py",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+
+def main():
+    args = sys.argv[1:]
+
+    if not args or args[0] in ("--help", "-h", "help"):
+        print(__doc__)
+        return
+
+    cmd = args[0].lower()
+    script = find_install_script()
+
+    if cmd == "install":
+        if not script:
+            print("Cannot find install.py. cd to ATLANTIS directory and run:")
+            print("  python install.py --auto")
+            sys.exit(1)
+        os.execv(sys.executable, [sys.executable, str(script), "--auto"])
+
+    elif cmd == "update":
+        if not script:
+            print("Cannot find install.py. Clone ATLANTIS first:")
+            print("  git clone https://github.com/PreviousGod/ATLANTIS.git")
+            print("  cd ATLANTIS && python install.py --auto")
+            sys.exit(1)
+        os.execv(sys.executable, [sys.executable, str(script), "--update", "--auto"])
+
+    elif cmd == "status":
+        if not script:
+            # Fallback: check manually
+            hh = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+            for name in ("live_brain", "live_brain_ctx", "nucleus"):
+                init = hh / "plugins" / name / "__init__.py"
+                status = "installed" if init.exists() else "MISSING"
+                print(f"  {name:20s} {status}")
+        else:
+            os.execv(sys.executable, [sys.executable, str(script), "--status"])
+
+    else:
+        print(f"Unknown command: {cmd}")
+        print(__doc__)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
