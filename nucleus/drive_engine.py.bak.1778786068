@@ -1,0 +1,470 @@
+"""DriveEngine — Intrinzična motivacija.
+
+Generiše interne ciljeve bez korisnikovog inputa:
+1. Curiosity: istraži nepoznate delove sistema
+2. Mastery: poboljšaj postojeći kod
+3. PredictiveError: zašto predikcija nije bila tačna?
+4. UserPattern: šta korisnik radi i kako se pripremiti?
+
+Generiše propozale koji idu korisniku na odobrenje.
+"""
+
+import json
+import logging
+import os
+import re
+import sqlite3
+import subprocess
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger("nucleus.drive")
+
+DRIVE_TICK_INTERVAL = 30
+PROPOSAL_QUEUE_MAX = 5
+URGENCY_THRESHOLD = 0.6
+
+_DRIVE_DB = Path.home() / ".hermes" / "nucleus_data" / "drives.db"
+_INTERESTS_FILE = (
+    Path.home() / ".hermes" / "nucleus_data" / "drive_interests.json"
+)
+
+
+@dataclass
+class DriveProposal:
+    drive_name: str
+    description: str
+    urgency: float
+    action_type: str
+    action_detail: str = ""
+    requires_approval: bool = True
+    evidence: str = ""
+
+    def to_dict(self) -> Dict:
+        return {
+            "drive": self.drive_name,
+            "description": self.description[:200],
+            "urgency": round(self.urgency, 2),
+            "action_type": self.action_type,
+            "requires_approval": self.requires_approval,
+        }
+
+
+class CuriosityDrive:
+    """Istražuje nepoznate fajlove, direktorijume, koncepte."""
+
+    def __init__(self, workdir: str = ""):
+        self.workdir = Path(workdir or os.getcwd())
+        self._known_paths: set = set()
+        self._interests: List[Dict] = self._load_interests()
+
+    def _load_interests(self) -> List[Dict]:
+        try:
+            if _INTERESTS_FILE.exists():
+                return json.loads(_INTERESTS_FILE.read_text())
+        except Exception:
+            pass
+        return []
+
+    def _save_interests(self):
+        try:
+            _INTERESTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _INTERESTS_FILE.write_text(
+                json.dumps(self._interests[-50:], indent=2, ensure_ascii=False)
+            )
+        except Exception as e:
+            logger.debug("[curiosity] save interests: %s", e)
+
+    def evaluate(self) -> Optional[DriveProposal]:
+        for interest in self._interests:
+            if interest.get("status") != "pending":
+                continue
+            created = interest.get("created_at", 0)
+            if time.time() - created > 3600:
+                interest["status"] = "expired"
+                self._save_interests()
+                continue
+            return DriveProposal(
+                drive_name="curiosity",
+                description=interest.get("description", "Explore something new"),
+                urgency=interest.get("urgency", 0.5),
+                action_type="explore",
+                action_detail=interest.get("path", ""),
+                requires_approval=True,
+            )
+        return None
+
+    def add_interest(self, description: str, path: str = "", urgency: float = 0.5):
+        self._interests.append({
+            "description": description,
+            "path": path,
+            "urgency": urgency,
+            "status": "pending",
+            "created_at": time.time(),
+        })
+        self._save_interests()
+
+    def scan_for_new_files(self) -> List[str]:
+        found = []
+        try:
+            for root in [self.workdir]:
+                if not root.exists():
+                    continue
+                for entry in list(root.iterdir())[:20]:
+                    if str(entry) not in self._known_paths:
+                        self._known_paths.add(str(entry))
+                        if entry.suffix in {".py", ".js", ".ts", ".md", ".json", ".yaml", ".yml"}:
+                            if entry.stat().st_size > 0:
+                                found.append(str(entry))
+        except PermissionError:
+            pass
+        return found
+
+
+class MasteryDrive:
+    """Analizira postojeći kod i predlaže poboljšanja."""
+
+    COMMON_ANTIPATTERNS = {
+        "TODO": (0.4, "Unresolved TODO found"),
+        "FIXME": (0.6, "Unresolved FIXME marker"),
+        "HACK": (0.5, "Hack/workaround detected"),
+        "print(": (0.3, "Debug print left in code"),
+        "except:": (0.6, "Bare except clause — catches all exceptions"),
+        "except Exception:": (0.3, "Broad exception — consider catching specific"),
+        "def handler": (0.3, "Generic function name 'handler'"),
+        "time.sleep(": (0.3, "Hardcoded sleep — consider await/poll"),
+    }
+
+    def __init__(self, workdir: str = ""):
+        self.workdir = Path(workdir or os.getcwd())
+        self._last_scan: Dict[str, float] = {}
+
+    def evaluate(self) -> Optional[DriveProposal]:
+        if not self.workdir.exists():
+            return None
+
+        scanned = self._scan_recent_files()
+        if not scanned:
+            return None
+
+        for filepath, issues in scanned[:3]:
+            if not issues:
+                continue
+            total_urgency = max(u for _, u in issues)
+            descriptions = [d for d, _ in issues[:2]]
+            return DriveProposal(
+                drive_name="mastery",
+                description=f"{filepath}: {'; '.join(descriptions)}",
+                urgency=total_urgency,
+                action_type="refactor_suggestion",
+                action_detail=filepath,
+                requires_approval=True,
+                evidence=json.dumps(issues),
+            )
+        return None
+
+    def _scan_recent_files(self) -> List[tuple]:
+        results = []
+        try:
+            for f in list(self.workdir.iterdir())[:15]:
+                if f.suffix not in {".py", ".js", ".ts"}:
+                    continue
+                if not f.is_file():
+                    continue
+                mtime = f.stat().st_mtime
+                if str(f) in self._last_scan and mtime <= self._last_scan[str(f)]:
+                    continue
+                self._last_scan[str(f)] = mtime
+                issues = self._scan_file(str(f))
+                if issues:
+                    results.append((str(f), issues))
+        except PermissionError:
+            pass
+        return results
+
+    def _scan_file(self, filepath: str) -> List[tuple]:
+        issues = []
+        try:
+            text = Path(filepath).read_text(encoding="utf-8", errors="replace")
+            lines = text.split("\n")
+            for i, line in enumerate(lines, 1):
+                for pattern, (urgency, desc) in self.COMMON_ANTIPATTERNS.items():
+                    if pattern in line and not line.strip().startswith(("#", "//", "/*", "*")):
+                        issues.append((f"Line {i}: {desc}", urgency))
+        except Exception:
+            pass
+        return issues[:5]
+
+
+class PredictiveErrorDrive:
+    """Proverava da li su CWM predikcije bile tačne i uči iz grešaka."""
+
+    def __init__(self, live_brain_conn=None):
+        self.live_brain_conn = live_brain_conn
+        self._last_check = 0.0
+
+    def evaluate(self) -> Optional[DriveProposal]:
+        conn = self.live_brain_conn
+        if not conn:
+            return None
+
+        now = time.time()
+        if now - self._last_check < 300:
+            return None
+        self._last_check = now
+
+        try:
+            wrong = conn.execute(
+                """SELECT COUNT(*) as c FROM cwm_predictions
+                   WHERE validation_status='wrong' AND validated_at > ?""",
+                (now - 86400,),
+            ).fetchone()
+            if wrong and wrong["c"] >= 2:
+                return DriveProposal(
+                    drive_name="predictive_error",
+                    description=f"{wrong['c']} predictions were wrong in the last 24h — CWM needs investigation",
+                    urgency=min(0.9, 0.5 + wrong["c"] * 0.1),
+                    action_type="investigate_predictions",
+                    requires_approval=True,
+                )
+        except Exception:
+            pass
+
+        try:
+            pending = conn.execute(
+                "SELECT COUNT(*) as c FROM cwm_predictions WHERE validation_status='pending'",
+            ).fetchone()
+            if pending and pending["c"] >= 5:
+                return DriveProposal(
+                    drive_name="predictive_error",
+                    description=f"{pending['c']} predictions still pending validation",
+                    urgency=0.5,
+                    action_type="validate_pending_predictions",
+                    requires_approval=True,
+                )
+        except Exception:
+            pass
+
+        return None
+
+
+class UserPatternDrive:
+    """Detektuje obrasce u korisnikovom ponašanju."""
+
+    def __init__(self):
+        self._history: List[Dict] = self._load_history()
+        self._patterns: Dict[str, float] = {}
+
+    def _load_history(self) -> List[Dict]:
+        try:
+            path = Path.home() / ".hermes" / "nucleus_data" / "user_history.jsonl"
+            if path.exists():
+                lines = path.read_text().strip().split("\n")
+                return [json.loads(l) for l in lines[-50:]]
+        except Exception:
+            pass
+        return []
+
+    def record_interaction(self, message: str, intent: str = ""):
+        self._history.append({
+            "message": message[:200],
+            "intent": intent,
+            "timestamp": time.time(),
+        })
+        self._history = self._history[-50:]
+        self._save_history()
+
+    def _save_history(self):
+        try:
+            path = Path.home() / ".hermes" / "nucleus_data" / "user_history.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w") as f:
+                for entry in self._history:
+                    f.write(json.dumps(entry) + "\n")
+        except Exception as e:
+            logger.debug("[user_pattern] save: %s", e)
+
+    def evaluate(self) -> Optional[DriveProposal]:
+        if len(self._history) < 3:
+            return None
+
+        recent = self._history[-10:]
+        intents = [h.get("intent", "") for h in recent if h.get("intent")]
+
+        if not intents:
+            return None
+
+        from collections import Counter
+        intent_counts = Counter(intents)
+        most_common = intent_counts.most_common(1)
+
+        if most_common and most_common[0][1] >= 3:
+            intent, count = most_common[0]
+            total = len(recent)
+            ratio = count / total if total > 0 else 0
+            if ratio >= 0.4:
+                return DriveProposal(
+                    drive_name="user_pattern",
+                    description=f"User frequently asks for '{intent}' ({count}/{total} recent messages)",
+                    urgency=min(0.7, 0.4 + ratio * 0.3),
+                    action_type="prepare_for_pattern",
+                    action_detail=intent,
+                    requires_approval=False,
+                )
+        return None
+
+
+class DriveEngine:
+    """Upravlja svim drive-ovima i generiše predloge."""
+
+    def __init__(self, workdir: str = "", live_brain_conn=None):
+        self.curiosity = CuriosityDrive(workdir)
+        self.mastery = MasteryDrive(workdir)
+        self.predictive = PredictiveErrorDrive(live_brain_conn)
+        self.user_pattern = UserPatternDrive()
+        self._tick_count = 0
+        self._last_proposal_time: Dict[str, float] = {}
+        self._pending_proposals: List[DriveProposal] = []
+        self._executed_count = 0
+
+    def tick(self) -> Optional[DriveProposal]:
+        self._tick_count += 1
+
+        if self._tick_count % DRIVE_TICK_INTERVAL != 0:
+            return None
+
+        new_files = self.curiosity.scan_for_new_files()
+        for fp in new_files:
+            desc = f"New file discovered: {fp}"
+            self.curiosity.add_interest(desc, fp, urgency=0.4)
+
+        drives = [
+            self.curiosity.evaluate(),
+            self.mastery.evaluate(),
+            self.predictive.evaluate(),
+            self.user_pattern.evaluate(),
+        ]
+
+        best = None
+        for proposal in drives:
+            if proposal is None:
+                continue
+            last = self._last_proposal_time.get(proposal.drive_name, 0)
+            if time.time() - last < 600:
+                continue
+            if proposal.urgency < URGENCY_THRESHOLD:
+                continue
+            if best is None or proposal.urgency > best.urgency:
+                best = proposal
+
+        if best:
+            self._last_proposal_time[best.drive_name] = time.time()
+            self._pending_proposals.append(best)
+            if len(self._pending_proposals) > PROPOSAL_QUEUE_MAX:
+                self._pending_proposals.pop(0)
+            logger.info(
+                "[drive] PROPOSAL from %s urgency=%.2f: %s",
+                best.drive_name, best.urgency, best.description[:60],
+            )
+
+        return best
+
+    def pop_pending(self) -> Optional[DriveProposal]:
+        if self._pending_proposals:
+            return self._pending_proposals.pop(0)
+        return None
+
+    def record_llm_call(self, message: str, intent: str = ""):
+        self.user_pattern.record_interaction(message, intent)
+
+    def get_stats(self) -> Dict[str, Any]:
+        return {
+            "ticks": self._tick_count,
+            "pending": len(self._pending_proposals),
+            "executed": self._executed_count,
+            "interests": len(self.curiosity._interests),
+            "pattern_history": len(self.user_pattern._history),
+        }
+
+    def execute_proposal(self, proposal: DriveProposal) -> Dict:
+        """Actually execute a drive proposal and write result to CWM."""
+        import sqlite3, time, json
+        self._executed_count += 1
+        result = {"success": True, "output": "", "error": ""}
+
+        # Grounding / execution based on action_type
+        if proposal.action_type == "explore" and proposal.action_detail:
+            try:
+                p = Path(proposal.action_detail)
+                if p.is_dir():
+                    items = [str(x) for x in list(p.iterdir())[:10]]
+                    result["output"] = f"Dir items: {len(items)}"
+                elif p.is_file():
+                    result["output"] = f"File size: {p.stat().st_size} bytes"
+                else:
+                    result["output"] = "Path not found"
+            except Exception as e:
+                result["success"] = False
+                result["error"] = str(e)
+        elif proposal.action_type == "refactor_suggestion":
+            from .code_validator import CodeValidator
+            validator = CodeValidator()
+            try:
+                code = Path(proposal.action_detail).read_text()
+                errors = validator.validate(code)
+                result["output"] = f"Validation: {len(errors)} error(s)"
+                result["success"] = len([e for e in errors if e.get('severity') == 'error']) == 0
+            except Exception as e:
+                result["success"] = False
+                result["error"] = str(e)
+        elif proposal.action_type == "prepare_for_pattern":
+            result["output"] = f"Prepared for pattern: {proposal.action_detail}"
+        else:
+            result["output"] = f"Drive {proposal.drive_name} acknowledged"
+
+        # Write to CWM
+        try:
+            lb_path = str(Path.home() / ".hermes" / "live_brain" / "live_brain.db")
+            conn = sqlite3.connect(lb_path, timeout=3)
+            now = time.time()
+            fact_id = f"cwm_drive:{proposal.drive_name}:{int(now)}"
+            conn.execute(
+                """INSERT OR REPLACE INTO causal_facts
+                   (fact_id, scope_key, cause_entity_type, cause_entity_id, cause_action,
+                    cause_detail, effect_entity_type, effect_entity_id, effect_outcome,
+                    effect_detail, cause_type, effect_type, confidence, observation_count,
+                    success_count, failure_count, last_observed_at, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)""",
+                (
+                    fact_id, "global", "drive", proposal.drive_name, proposal.action_type,
+                    proposal.description[:500], "action", proposal.action_detail[:240], "drive_executed",
+                    "success" if result["success"] else "failure", "intrinsic_motivation", "execution_result",
+                    proposal.urgency,
+                    1 if result["success"] else 0,
+                    0 if result["success"] else 1,
+                    now, now, now,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO cwm_learning_log
+                   (log_id, scope_key, trigger_type, trigger_description, causal_fact_id, lesson,
+                    abstraction_generated, confidence_change, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    f"log:{fact_id}", "global", "drive_execution", proposal.description[:200], fact_id,
+                    f"Drive {proposal.drive_name} executed {proposal.action_type}: {result['output'][:200]}",
+                    0, 0.0, now,
+                ),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.debug("[drive_cwm] failed: %s", e)
+
+        logger.info(
+            "[drive] EXECUTED %s: %s | success=%s",
+            proposal.drive_name, proposal.description[:60], result["success"],
+        )
+        return result

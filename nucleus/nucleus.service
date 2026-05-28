@@ -1,0 +1,17 @@
+[Unit]
+Description=Nucleus Autonomni Entitet (standalone, opt-in)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.hermes/plugins
+Environment=PYTHONPATH=%h/.hermes/plugins
+Environment=NUCLEUS_STANDALONE=1
+ExecStart=%h/.hermes/hermes-agent/venv/bin/python -m nucleus.nucleus_engine
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:%h/.hermes/nucleus_data/nucleus.log
+StandardError=append:%h/.hermes/nucleus_data/nucleus.log
+
+[Install]
+WantedBy=default.target

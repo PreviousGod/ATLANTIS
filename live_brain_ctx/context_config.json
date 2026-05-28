@@ -11,7 +11,7 @@
     "hi",
     "hey",
     "cao",
-    "ćao",
+    "\u0107ao",
     "ciao",
     "ok",
     "okej",
@@ -20,7 +20,7 @@
     "ajde",
     "nastavi",
     "sta ima",
-    "šta ima",
+    "\u0161ta ima",
     "kako si"
   ],
   "low_signal_words": [
@@ -34,7 +34,7 @@
     "uradi",
     "kako",
     "sta",
-    "šta",
+    "\u0161ta",
     "what",
     "which",
     "with",

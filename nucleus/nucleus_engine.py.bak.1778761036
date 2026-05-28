@@ -1,0 +1,313 @@
+"""Nucleus Engine — Kognitivni Otkucaj (1Hz Tick Loop).
+
+Flow per tick:
+  1. Percepcija (sensor)
+  2. Evaluacija bola (entropy)
+  3. Kognicija: graf → web → LLM (eskalacija)
+  4. Akcija (instinct execution)
+  5. Učenje (graph update + live brain sync)
+"""
+import json
+import logging
+import os
+import signal
+import sys
+import time
+import fcntl
+from pathlib import Path
+
+from .config import (
+    TICK_RATE, ENTROPY_THRESHOLD, DATA_DIR, PID_FILE, LOG_FILE,
+    LOCK_FILE, INSTINCTS_DIR, SYNC_INTERVAL_TICKS,
+)
+from .sensor import Sensor
+from .entropy import EntropyEngine
+from .pargod import Pargod
+from .instinct_guard import InstinctGuard
+from .researcher import research_problem
+from .intervention import InterventionEngine
+from .llm_bridge import generate_instinct, can_call_llm
+from .live_brain_sync import LiveBrainSync
+from .session_state import get_session_state
+from .world_model import WorldModel
+from .proactive_suggester import ProactiveSuggester
+from .ego_model import EgoModel
+from .log_watcher import get_log_watcher
+
+log = logging.getLogger("nucleus")
+
+
+class Nucleus:
+    def __init__(self):
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        INSTINCTS_DIR.mkdir(parents=True, exist_ok=True)
+        self.running = False
+        self.tick = 0
+        self.sensor = Sensor()
+        self.entropy = EntropyEngine()
+        self.pargod = Pargod()
+        self.guard = InstinctGuard()
+        self.intervention = InterventionEngine()
+        self.brain_sync = LiveBrainSync()
+        self.session_state = get_session_state()
+        self.world_model = WorldModel()
+        self.suggester = ProactiveSuggester()
+        self._last_suggestion = None
+        self.ego = EgoModel()
+        self.log_watcher = get_log_watcher()
+        self._recent_actions = []
+        self._lock_handle = None
+        self._setup_logging()
+        self._auto_seed()
+
+    def _setup_logging(self):
+        for handler in log.handlers:
+            if isinstance(handler, logging.FileHandler) and Path(handler.baseFilename) == LOG_FILE:
+                log.setLevel(logging.INFO)
+                return
+        handler = logging.FileHandler(LOG_FILE)
+        handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", "%H:%M:%S"))
+        log.addHandler(handler)
+        log.setLevel(logging.INFO)
+
+    def _mode(self):
+        return "standalone" if os.getenv("NUCLEUS_STANDALONE", "").strip().lower() in {"1", "true", "yes", "on"} else "embedded"
+
+    def _acquire_runtime_lock(self):
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        handle = LOCK_FILE.open("a+")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            handle.seek(0)
+            owner = handle.read().strip()
+            handle.close()
+            log.info("Runtime lock busy; another Nucleus heartbeat is active (%s)", owner or "unknown owner")
+            return False
+        handle.seek(0)
+        handle.truncate()
+        handle.write(json.dumps({"pid": os.getpid(), "mode": self._mode(), "started_at": time.time()}))
+        handle.flush()
+        self._lock_handle = handle
+        return True
+
+    def _release_runtime_lock(self):
+        if not self._lock_handle:
+            return
+        try:
+            self._lock_handle.seek(0)
+            self._lock_handle.truncate()
+            self._lock_handle.flush()
+            fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._lock_handle.close()
+            self._lock_handle = None
+
+    def _auto_seed(self):
+        if not self.pargod.list_nodes():
+            seed = Path(__file__).parent / "seed_graph.json"
+            if seed.exists():
+                self.pargod.seed_from_json(str(seed))
+                log.info(f"Auto-seeded graph: {len(self.pargod.list_nodes())} nodes")
+
+    def _write_pid(self):
+        PID_FILE.write_text(json.dumps({"pid": os.getpid(), "mode": self._mode(), "started_at": time.time()}) + "\n")
+
+    def _remove_pid(self):
+        try:
+            data = json.loads(PID_FILE.read_text() or "{}")
+        except Exception:
+            data = {}
+        if data.get("pid") in {None, os.getpid()}:
+            PID_FILE.unlink(missing_ok=True)
+
+    def _handle_signal(self, sig, frame):
+        log.info("Shutdown signal received.")
+        self.running = False
+
+    def _execute_instinct(self, tool_label):
+        script = INSTINCTS_DIR / f"{tool_label}.py"
+        if not script.exists():
+            return {"success": False, "error": f"Missing: {script}"}
+        result = self.guard.execute(str(script))
+        if result["success"]:
+            self.pargod.record_use(tool_label)
+        return result
+
+    def _escalate_web(self, problem):
+        """Middle layer: structured local/web research before waking LLM."""
+        result = research_problem(
+            problem,
+            brain_sync=self.brain_sync,
+            pargod=self.pargod,
+            include_web=True,
+        )
+        if not result:
+            return None
+        log.info(
+            "RESEARCH: learned problem=%r scope=%s local=%d web=%d",
+            problem, result.get("scope"), len(result.get("local_sources", [])),
+            len(result.get("web_sources", [])),
+        )
+        return result
+
+    def _escalate_llm(self, problem, state):
+        """Last resort: wake LLM to generate new instinct."""
+        if not can_call_llm():
+            log.info(f"LLM on cooldown, skipping mutation for '{problem}'")
+            return None
+        log.info(f"LLM MUTATION: Generating instinct for '{problem}'")
+        result = generate_instinct(problem, json.dumps(state))
+        if not result or not result.get("success"):
+            log.warning(f"LLM mutation failed: {result}")
+            return None
+        code = result["code"]
+        filename = f"instinct_{problem}_{int(time.time())}.py"
+        filepath = INSTINCTS_DIR / filename
+        filepath.write_text(code)
+        # Arena test
+        arena = self.guard.execute(str(filepath))
+        if not arena["success"]:
+            log.warning(f"ARENA REJECT: {filename} — {arena.get('error')}")
+            filepath.unlink()
+            return None
+        # Survived — add to graph
+        tool_label = filename[:-3]
+        self.pargod.add_node("tool", tool_label, f"Auto-generated for {problem}")
+        self.pargod.add_edge(problem, tool_label, "RESOLVES", 1.0)
+        self.brain_sync.write_artifact(str(filepath), f"Nucleus instinct: {problem}")
+        log.info(f"MUTATION OK: {tool_label} added to graph")
+        return tool_label
+
+    def _tick(self):
+        state = self.sensor.read()
+        ent = self.entropy.calculate(state)
+        action_taken = None
+        log.info(f"TICK {self.tick:05d} | entropy={ent:5.2f} | CPU={state['cpu_percent']:5.1f}% | RAM={state['ram_percent']:5.1f}% | DISK={state['disk_percent']:5.1f}%")
+
+        # ── WorldModel: record snapshot + detect anomaly ──
+        anomaly = self.world_model.detect_anomaly("system", ent)
+        self.world_model.record_snapshot(
+            tick=self.tick,
+            domain="system",
+            state=state,
+            entropy=ent,
+            anomaly_score=anomaly,
+        )
+        if anomaly > 0.7:
+            log.info("ANOMALY detected: score=%.2f | entropy=%.2f", anomaly, ent)
+
+        # ── ProactiveSuggester: anticipatorne sugestije ──
+        suggestion = self.suggester.check_and_suggest(state)
+        if suggestion:
+            self._last_suggestion = suggestion
+            log.info(
+                "SUGGESTION [%s|%s] %s (action: %s)",
+                suggestion["category"],
+                suggestion["severity"],
+                suggestion["message"],
+                suggestion["action"],
+            )
+
+        # ── Ciel: EgoModel — self-awareness & reflection ──
+        ego = self.ego.assess_state(self.tick, ent, state, self._recent_actions)
+        wm_summary = self.world_model.get_summary("system") if self.tick % 10 == 0 else {}
+        self.ego.reflect(self.tick, ego, state, action_taken, wm_summary if wm_summary.get("snapshots_count") else None)
+
+        # ── Ciel: Autonomous agency ──
+        auto_action = self.ego.consider_autonomous_action(self.tick, ego, state, suggestion)
+        if auto_action:
+            result = self.ego.execute_autonomous_action(auto_action, self)
+            log.info(
+                "AUTO-ACTION [%s] %s | approved=%s | result=%s",
+                auto_action["type"],
+                auto_action["description"][:60],
+                auto_action.get("approved", False),
+                result.get("output", "")[:40],
+            )
+            # Track for ego learning
+            self._recent_actions.append(f"auto:{auto_action['type']}:{('ok' if result['success'] else 'fail')}")
+            self._recent_actions = self._recent_actions[-20:]  # keep last 20
+
+        # Log session state summary if active
+        ss = self.session_state.snapshot()
+        pending_count = len(ss.get('pending_changes', []))
+        if ss['tool_calls_count'] > 0 or pending_count > 0:
+            log.info(
+                "SESSION: files=%d pending=%d intent=%s",
+                len(ss['active_files']),
+                pending_count,
+                ss['user_intent'],
+            )
+
+        if ent > ENTROPY_THRESHOLD:
+            sources = self.entropy.identify_sources(state)
+            for problem in sources:
+                # Fast path: graph knows
+                path = self.pargod.find_tool_for_problem(problem)
+                if path:
+                    log.info(f"GRAPH PATH: {' → '.join(path['path'])} (cost={path['cost']:.1f})")
+                    result = self._execute_instinct(path["tool"])
+                    action_taken = f"graph:{problem}->{path['tool']}:{'ok' if result.get('success') else 'fail'}"
+                    continue
+                # Middle path: web search
+                web_result = self._escalate_web(problem)
+                if web_result:
+                    action_taken = f"web:{problem}"
+                    continue
+                # Slow path: LLM mutation
+                tool_label = self._escalate_llm(problem, state)
+                action_taken = f"llm:{problem}->{tool_label}" if tool_label else f"llm:{problem}:none"
+
+        # Periodic sync
+        if self.tick % SYNC_INTERVAL_TICKS == 0 and self.tick > 0:
+            self.brain_sync.sync_to_pargod(self.pargod)
+            self.pargod.decay_edges()
+            # WorldModel summary
+            wm_summary = self.world_model.get_summary("system")
+            log.info(
+                "WORLD: snapshots=%d avg_entropy=%s predicted=%s anomaly=%.2f concern=%.2f",
+                wm_summary["snapshots_count"],
+                wm_summary["avg_entropy_10min"],
+                wm_summary["predicted_entropy"],
+                wm_summary["anomaly_score"],
+                wm_summary["concern_level"],
+            )
+
+        self.pargod.log_episode(self.tick, ent, state, action_taken)
+
+    def run(self):
+        """Main loop — call from daemon or directly."""
+        import threading
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGTERM, self._handle_signal)
+            signal.signal(signal.SIGINT, self._handle_signal)
+        if not self._acquire_runtime_lock():
+            self.running = False
+            return
+        self._write_pid()
+        self.running = True
+        self.log_watcher.start()
+        log.info("=== Nucleus heartbeat started (%s) ===", self._mode())
+        try:
+            while self.running:
+                self.tick += 1
+                self._tick()
+                time.sleep(TICK_RATE)
+        finally:
+            self.log_watcher.stop()
+            self._remove_pid()
+            self._release_runtime_lock()
+            log.info("=== Nucleus heartbeat stopped ===")
+
+    def run_threaded(self):
+        """Run in a background daemon thread (for plugin mode)."""
+        import threading
+        t = threading.Thread(target=self.run, daemon=True, name="nucleus-heartbeat")
+        t.start()
+        return t
+
+
+if __name__ == "__main__":
+    n = Nucleus()
+    n.run()

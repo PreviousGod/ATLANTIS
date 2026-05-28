@@ -3597,6 +3597,52 @@ def _record_context_impression(scope_key: str, session_id: str, user_message: st
             pass
 
 
+def _build_turn_economy_section(*, session_id: str, scope_key: str, turn_lane: str) -> str:
+    """Inject escalating turn-economy awareness to prevent death spirals."""
+    if not session_id or not scope_key:
+        return ""
+    db_path = _db_path()
+    if not Path(db_path).exists():
+        return ""
+    conn = None
+    try:
+        conn = _get_connection()
+        now = time.time()
+        cutoff = now - 3600
+        row = conn.execute(
+            "SELECT COUNT(*) AS turn_count FROM context_impressions WHERE session_id=? AND created_at >= ?",
+            (session_id, cutoff),
+        ).fetchone()
+        turn_count = int(row["turn_count"]) if row else 0
+        if turn_count < 3:
+            return ""
+        if turn_count >= 15:
+            return (
+                f"CRITICAL TURN ECONOMY:\n- {turn_count}+ turns spent. STOP all tool calls IMMEDIATELY.\n"
+                "- Summarize what you know and ask the user for direction.\n"
+                "- If a tool failed 2+ times, do NOT retry it — explain the failure."
+            )
+        if turn_count >= 8:
+            return (
+                f"TURN ECONOMY WARNING:\n- {turn_count} turns spent. You may be stuck.\n"
+                "- If the last 2+ tool calls failed, STOP and explain.\n"
+                "- Prefer a clear status update over another attempt."
+            )
+        return (
+            f"TURN ECONOMY:\n- {turn_count} turns used. Be efficient.\n"
+            "- If a tool failed, do NOT retry with the same arguments.\n"
+            "- Consider whether you can answer without more tool calls."
+        )
+    except Exception:
+        return ""
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def _pre_llm_call(**kwargs):
     try:
         return _pre_llm_call_inner(**kwargs)
@@ -3968,6 +4014,19 @@ def _pre_llm_call_inner(**kwargs):
     )
     if policy_block:
         context = (context + "\n\n" + policy_block) if context else policy_block
+
+    # P2.6: turn-economy stuck detector — escalating warnings at 3/8/15 turns
+    if context and qctx.turn_lane in {'deep_execution', 'simple_execution', 'continuation_or_resume'}:
+        try:
+            turn_economy = _build_turn_economy_section(
+                session_id=session_id,
+                scope_key=scope_key,
+                turn_lane=qctx.turn_lane,
+            )
+            if turn_economy:
+                context = (turn_economy + "\n\n" + context) if context else turn_economy
+        except Exception:
+            pass
 
     # NOTE: bridge.gather_contributions already ran earlier (before the
     # empty-context early-return). Do NOT call it again here — that would

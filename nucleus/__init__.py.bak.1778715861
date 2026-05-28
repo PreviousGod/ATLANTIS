@@ -1,0 +1,474 @@
+"""Nucleus Plugin — Autonomni Entitet sa LLM Bypass-om.
+
+Registers with Hermes plugin system and monkey-patches run_agent.AIAgent
+to skip LLM calls when Pargod graph has a deterministic answer.
+"""
+from __future__ import annotations
+
+import logging
+import os
+import threading
+from pathlib import Path
+
+log = logging.getLogger("nucleus")
+
+_nucleus_instance = None
+_nucleus_lock = threading.Lock()
+_patch_applied = False
+
+_NUCLEUS_PREFIXES = ("/nucleus", "nucleus:", "nucleus ")
+_NUCLEUS_WEB_PREFIXES = (
+    "/nucleus web",
+    "/nucleus search",
+    "/nucleus research",
+    "nucleus web",
+    "nucleus search",
+    "nucleus research",
+    "nucleus: web",
+    "nucleus: search",
+    "nucleus: research",
+)
+_NUCLEUS_STATUS_PREFIXES = (
+    "/nucleus status",
+    "/nucleus metrics",
+    "/nucleus queue",
+    "nucleus status",
+    "nucleus metrics",
+    "nucleus queue",
+    "nucleus: status",
+    "nucleus: metrics",
+    "nucleus: queue",
+)
+_NUCLEUS_DOCTOR_PREFIXES = (
+    "/nucleus doctor",
+    "/nucleus preflight",
+    "nucleus doctor",
+    "nucleus preflight",
+    "nucleus: doctor",
+    "nucleus: preflight",
+)
+_SYSTEM_PROBLEM_PHRASES = (
+    "high cpu",
+    "cpu usage",
+    "cpu high",
+    "high ram",
+    "ram usage",
+    "memory usage",
+    "disk full",
+    "disk space critically low",
+    "zombie process",
+    "port conflict",
+    "port already in use",
+    "oom risk",
+    "out of memory",
+    "high load",
+    "load average",
+    "swap thrash",
+    "inode exhaustion",
+    "dns failure",
+    "service down",
+    "log flood",
+    "network saturated",
+    "temp files bloat",
+    "stale connections",
+    "time_wait",
+)
+
+
+def _env_enabled(name):
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_nucleus_graph_query(message):
+    """Only bypass chat for explicit Nucleus requests or known ops problems."""
+    if not isinstance(message, str):
+        return False
+    text = message.strip().lower()
+    if not text or len(text) >= 500:
+        return False
+    if text.startswith(_NUCLEUS_PREFIXES):
+        return True
+    if text.startswith("nucleus teach"):
+        return True
+    if text.startswith("nucleus suggest"):
+        return True
+    if text.startswith("nucleus ego"):
+        return True
+    return any(phrase in text for phrase in _SYSTEM_PROBLEM_PHRASES)
+
+
+def _is_nucleus_web_query(message):
+    """Web bypass is opt-in; generic chat must stay with the LLM."""
+    if not isinstance(message, str):
+        return False
+    text = message.strip().lower()
+    if not text or len(text) >= 500:
+        return False
+    return _env_enabled("NUCLEUS_WEB_BYPASS") or text.startswith(_NUCLEUS_WEB_PREFIXES)
+
+
+def _is_nucleus_status_query(message):
+    if not isinstance(message, str):
+        return False
+    text = message.strip().lower()
+    if not text or len(text) >= 500:
+        return False
+    return text.startswith(_NUCLEUS_STATUS_PREFIXES)
+
+
+def _is_nucleus_doctor_query(message):
+    if not isinstance(message, str):
+        return False
+    text = message.strip().lower()
+    if not text or len(text) >= 500:
+        return False
+    return text.startswith(_NUCLEUS_DOCTOR_PREFIXES)
+
+
+def _strip_nucleus_web_prefix(message):
+    raw = message.strip()
+    lowered = raw.lower()
+    for prefix in _NUCLEUS_WEB_PREFIXES:
+        if lowered.startswith(prefix):
+            return raw[len(prefix):].strip(" :-") or raw
+    return raw
+
+
+def _get_nucleus():
+    """Lazy singleton — starts Nucleus engine in background thread."""
+    global _nucleus_instance
+    if _nucleus_instance is not None:
+        return _nucleus_instance
+    with _nucleus_lock:
+        if _nucleus_instance is not None:
+            return _nucleus_instance
+        from .nucleus_engine import Nucleus
+        _nucleus_instance = Nucleus()
+        if _env_enabled("NUCLEUS_DISABLE_EMBEDDED"):
+            log.info("Nucleus embedded heartbeat disabled by NUCLEUS_DISABLE_EMBEDDED")
+        else:
+            _nucleus_instance.run_threaded()
+            log.info("Nucleus daemon thread started")
+    return _nucleus_instance
+
+
+def _apply_monkey_patch():
+    """Patch AIAgent.run_conversation with guarded Nucleus bypasses."""
+    global _patch_applied
+    if _patch_applied:
+        return
+
+    import run_agent
+    original_run_conversation = run_agent.AIAgent.run_conversation
+
+    def _make_bypass_response(user_message, text, reason, model_label):
+        return {
+            "final_response": text,
+            "last_reasoning": None,
+            "messages": [
+                {"role": "user", "content": user_message},
+                {"role": "assistant", "content": text},
+            ],
+            "api_calls": 0,
+            "completed": True,
+            "turn_exit_reason": reason,
+            "partial": False,
+            "interrupted": False,
+            "response_previewed": False,
+            "model": f"nucleus/{model_label}",
+            "provider": "nucleus",
+            "base_url": "",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "session_input_tokens": 0,
+            "session_output_tokens": 0,
+        }
+
+    def patched_run_conversation(self, user_message, *args, **kwargs):
+        """Guarded escalation: explicit/confident graph → opt-in web → LLM."""
+        if _is_nucleus_doctor_query(user_message):
+            from .doctor import format_doctor, run_doctor
+            response_text = format_doctor(run_doctor(run_web=" web" in user_message.lower()))
+            log.info("BYPASS(doctor): '%s'", user_message[:50])
+            return _make_bypass_response(user_message, response_text, "nucleus_doctor", "doctor")
+
+        if _is_nucleus_status_query(user_message):
+            nucleus = _get_nucleus()
+            from .status import collect_status, format_status
+            response_text = format_status(collect_status(nucleus))
+            log.info("BYPASS(status): '%s'", user_message[:50])
+            return _make_bypass_response(user_message, response_text, "nucleus_status", "status")
+
+        if _is_nucleus_graph_query(user_message) or _is_nucleus_web_query(user_message):
+            nucleus = _get_nucleus()
+
+            # --- Level 1: Graph (Pargod) ---
+            answer = nucleus.pargod.has_answer_for(user_message) if _is_nucleus_graph_query(user_message) else None
+            if answer and not _is_nucleus_web_query(user_message):
+                tool_label = answer["tool"]
+                result = nucleus._execute_instinct(tool_label)
+                if result.get("success") and result.get("stdout"):
+                    response_text = result["stdout"].strip()
+                    log.info(f"BYPASS(graph): '{user_message[:50]}' → {tool_label} (0 tokens)")
+                    return _make_bypass_response(user_message, response_text, "nucleus_bypass", "pargod")
+
+            # --- Level 1.5: nucleus suggest ---
+            if user_message.strip().lower().startswith("nucleus suggest"):
+                from .proactive_suggester import ProactiveSuggester
+                ps = ProactiveSuggester()
+                stats = ps.get_stats()
+                lines = [
+                    "[NUCLEUS SUGGESTIONS]",
+                    f"Rules: {stats['total_rules']} | Shown: {stats['total_shown']} | Acted: {stats['times_acted']} | Ignored: {stats['times_ignored']}",
+                    f"Effectiveness: {stats['effectiveness']} | Last hour: {stats['last_hour']}",
+                ]
+                # List top rules
+                import sqlite3
+                db = Path.home() / ".hermes" / "nucleus_data" / "pargod.db"
+                with sqlite3.connect(str(db)) as conn:
+                    rows = conn.execute(
+                        """SELECT category, severity, message, times_shown, times_acted, confidence
+                           FROM suggestions ORDER BY confidence DESC LIMIT 5"""
+                    ).fetchall()
+                    if rows:
+                        lines.append("Top rules:")
+                        for r in rows:
+                            lines.append(f"- [{r[0]}|{r[1]}] {r[2][:50]}... (shown={r[3]}, acted={r[4]}, conf={r[5]})")
+                response_text = "\n".join(lines)
+                log.info("BYPASS(suggest): '%s'", user_message[:50])
+                return _make_bypass_response(user_message, response_text, "nucleus_suggest", "suggest")
+
+            # --- Level 1.5: nucleus ego ---
+            if user_message.strip().lower().startswith("nucleus ego"):
+                from .ego_model import EgoModel
+                ego = EgoModel()
+                stats = ego.get_stats()
+                lines = [
+                    "[NUCLEUS EGO / CIEL]",
+                    f"Current mood: {stats['current_mood']} | Entropy: {stats['current_entropy']:.2f}",
+                    f"Reflections: {stats['reflections']} | Autonomous actions: {stats['autonomous_executed']}/{stats['autonomous_total']}",
+                    f"Mood history: {stats['mood_distribution']}",
+                ]
+                # Last 3 reflections
+                refs = ego.get_last_reflection(3)
+                if refs:
+                    lines.append("Recent thoughts:")
+                    for r in refs:
+                        lines.append(f"- [{r['trigger']}] {r['monologue'][:70]}...")
+                response_text = "\n".join(lines)
+                log.info("BYPASS(ego): '%s'", user_message[:50])
+                return _make_bypass_response(user_message, response_text, "nucleus_ego", "ego")
+
+            # --- Level 1.5: nucleus teach ---
+            if user_message.strip().lower().startswith("nucleus teach"):
+                parts = user_message.strip().split("|", 3)
+                if len(parts) >= 3:
+                    _, tool_name, mistake, correction = parts[0].strip(), parts[1].strip(), parts[2].strip(), (parts[3].strip() if len(parts) > 3 else "")
+                    from .learning_engine import LearningEngine
+                    le = LearningEngine()
+                    ph = le.teach(tool_name, mistake[:50], mistake, correction or "")
+                    stats = le.get_stats()
+                    response_text = (
+                        f"Pattern recorded: {ph[:8]}...\n"
+                        f"Stats: {stats['total_patterns']} patterns, "
+                        f"avg confidence {stats['avg_confidence']}"
+                    )
+                    log.info("BYPASS(teach): '%s'", user_message[:50])
+                    return _make_bypass_response(user_message, response_text, "nucleus_teach", "teach")
+                else:
+                    response_text = "Usage: nucleus teach | tool_name | mistake | correction"
+                    return _make_bypass_response(user_message, response_text, "nucleus_teach", "teach")
+
+            # --- Level 2: Web Search (explicit/opt-in only) ---
+            research_result = nucleus._escalate_web(_strip_nucleus_web_prefix(user_message)) if _is_nucleus_web_query(user_message) else None
+            if research_result:
+                from .researcher import format_research_summary
+                response_text = format_research_summary(research_result)
+                log.info(
+                    "BYPASS(research): '%s' → scope=%s facts=%d",
+                    user_message[:50], research_result.get("scope"), len(research_result.get("facts", [])),
+                )
+                return _make_bypass_response(user_message, response_text, "nucleus_research", "research")
+
+        # --- Level 3: LLM (original) ---
+        return original_run_conversation(self, user_message, *args, **kwargs)
+
+    run_agent.AIAgent.run_conversation = patched_run_conversation
+    _patch_applied = True
+    log.info("Monkey-patch applied: AIAgent.run_conversation → guarded Nucleus bypass (chat→LLM by default)")
+
+
+def _pre_llm_hook(session_id=None, user_message=None, **kwargs):
+    """Hook: inject graph knowledge + detect feedback on interventions."""
+    if not user_message or not isinstance(user_message, str):
+        return None
+    sid = str(session_id or "")
+    msg = str(user_message)
+
+    # Update SessionState with user message
+    from .session_state import get_session_state
+    state = get_session_state()
+    state.on_user_message(sid, msg)
+
+    # ── LearningEngine: detect feedback on recent interventions ──
+    from .learning_engine import LearningEngine
+    learning = LearningEngine()
+    feedback_result = learning.apply_feedback(sid, msg)
+    if feedback_result:
+        log.info("LEARN feedback applied: %s", feedback_result)
+        return {"context": f"[NUCLEUS LEARN] {feedback_result}"}
+
+    # ── ProactiveSuggester: detect reactions to suggestions ──
+    from .proactive_suggester import ProactiveSuggester
+    suggester = ProactiveSuggester()
+    reaction = suggester.record_user_response(sid, msg)
+    if reaction:
+        log.info("SUGGESTION reaction: %s", reaction)
+        return {"context": f"[NUCLEUS SUGGEST] {reaction}"}
+    
+    # ── ProactiveSuggester: deliver pending suggestions ──
+    pending = suggester.read_and_clear_pending()
+    if pending:
+        log.info("DELIVERING suggestion to user: %s", pending["message"][:50])
+        ctx_msg = (
+            f"[NUCLEUS PROACTIVE] {pending['message']}\n"
+            f"Suggested action: {pending.get('action', 'N/A')}\n"
+            f"Reply 'uradio sam' if done, 'ignoriši' to dismiss."
+        )
+        return {"context": ctx_msg}
+
+    from .failure_trigger import get_continuation_context
+    continuation = get_continuation_context(sid, msg)
+    if continuation:
+        return {"context": continuation}
+    if not _is_nucleus_graph_query(msg):
+        return None
+    nucleus = _get_nucleus()
+    resolution = nucleus.pargod.has_resolution_for(msg)
+    if not resolution:
+        return None
+    path = " → ".join(resolution.get("path", []))
+    if resolution.get("type") == "tool":
+        return {"context": f"[NUCLEUS] Graph knows: {resolution['tool']} resolves this (path: {path})"}
+    if resolution.get("type") == "fix_recipe":
+        return {"context": _format_recipe_context(resolution, path)}
+    return None
+
+
+def _format_recipe_context(resolution, path):
+    content = resolution.get("content") or "{}"
+    try:
+        import json
+        recipe = json.loads(content)
+    except Exception:
+        recipe = {"raw": content}
+    lines = [
+        "[NUCLEUS] Research-backed fix recipe available.",
+        f"Path: {path}",
+    ]
+    problem = recipe.get("problem_pattern")
+    if problem:
+        lines.append(f"Problem pattern: {problem}")
+    steps = recipe.get("steps") or []
+    if steps:
+        lines.append("Steps:")
+        for step in steps[:5]:
+            lines.append(f"- {step}")
+    success = recipe.get("success_criteria")
+    if success:
+        lines.append(f"Success criteria: {success}")
+    sources = recipe.get("source_refs") or []
+    if sources:
+        lines.append("Sources:")
+        for source in sources[:5]:
+            lines.append(f"- {source}")
+    return "\n".join(lines)
+
+
+def _pre_tool_hook(tool_name=None, args=None, session_id=None, **kwargs):
+    """Hook: veto tool calls that match known mistake patterns."""
+    if not tool_name:
+        return None
+    # Update SessionState before intervention check
+    from .session_state import get_session_state
+    state = get_session_state()
+    state.on_pre_tool(tool_name, args or {}, str(session_id or ""))
+
+    from .intervention import InterventionEngine
+    eng = InterventionEngine()
+    intervention = eng.check(tool_name, args, str(session_id or ""))
+    if intervention:
+        log.info(
+            "INTERVENTION blocked tool=%s pattern=%r confidence=%.2f",
+            tool_name, intervention.get("pattern"), intervention.get("confidence", 0),
+        )
+        return intervention
+    return None
+
+
+def _post_tool_hook(tool_name=None, tool_result=None, result=None, session_id=None, **kwargs):
+    """Hook: learn from tool results — add successful patterns to graph."""
+    tool_output = tool_result if tool_result is not None else result
+    if not tool_name or tool_output is None:
+        return None
+    # Update SessionState after tool execution
+    from .session_state import get_session_state
+    state = get_session_state()
+    state.on_post_tool(tool_name, tool_output, str(session_id or ""))
+
+    nucleus = _get_nucleus()
+    # If a tool succeeded, record it as a known solution pattern
+    if not isinstance(tool_output, str):
+        tool_output = str(tool_output)
+    from .failure_trigger import tool_failure_problem
+    failure_problem = tool_failure_problem(tool_name, tool_output)
+    if not failure_problem:
+        node_label = f"hermes_tool_{tool_name}"
+        if not nucleus.pargod.get_node(node_label):
+            nucleus.pargod.add_node("tool", node_label, f"Hermes tool: {tool_name}")
+        nucleus.pargod.record_use(node_label)
+    else:
+        from .failure_trigger import schedule_epistemic_research
+        status = schedule_epistemic_research(
+            nucleus,
+            failure_problem,
+            trigger="tool_failure",
+            session_id=str(kwargs.get("session_id") or ""),
+        )
+        log.info("AUTO-RESEARCH tool_failure status=%s tool=%s", status, tool_name)
+    return None
+
+
+def _post_llm_hook(user_message=None, assistant_response=None, **kwargs):
+    """Hook: trigger background research when the LLM exposes an epistemic gap."""
+    if not user_message or not assistant_response:
+        return None
+    from .failure_trigger import schedule_epistemic_research, should_research_after_llm
+    if not should_research_after_llm(str(user_message), str(assistant_response)):
+        return None
+    nucleus = _get_nucleus()
+    status = schedule_epistemic_research(
+        nucleus,
+        str(user_message),
+        trigger="llm_gap",
+        session_id=str(kwargs.get("session_id") or ""),
+    )
+    log.info("AUTO-RESEARCH llm_gap status=%s", status)
+    return None
+
+
+def register(ctx):
+    """Hermes plugin entry point."""
+    # Apply the monkey-patch (exclusive LLM bypass)
+    _apply_monkey_patch()
+
+    # Register hooks as secondary mechanism
+    ctx.register_hook("pre_llm_call", _pre_llm_hook)
+    ctx.register_hook("pre_tool_call", _pre_tool_hook)
+    ctx.register_hook("post_tool_call", _post_tool_hook)
+    ctx.register_hook("post_llm_call", _post_llm_hook)
+
+    # Start Nucleus daemon
+    _get_nucleus()
+
+    log.info("Nucleus plugin registered")

@@ -1,0 +1,6 @@
+[
+  {
+    "role": "assistant",
+    "content": "THINK: [Analyze the user's request against the context below. What do they need? What tools or knowledge apply?]\nKNOW: [What do I already know from the context that's relevant?]\nACT:"
+  }
+]

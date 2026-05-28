@@ -310,6 +310,109 @@ GRAPH_DEBUG_SCHEMA = {
 }
 
 
+# P2.7: lane-gated tool visibility. Weak LLMs see only the tools relevant
+# to the current turn lane — less choice = less hallucination.
+_LANE_TOOL_NAMES: Dict[str, set] = {
+    "chit_chat": set(),
+    "simple_execution": {
+        "brain_recap", "brain_recall", "brain_reality_debug",
+        "brain_list_artifacts", "brain_mark_artifact", "brain_resolve_artifact",
+    },
+    "deep_execution": {
+        "brain_recap", "brain_recall", "brain_reality_debug",
+        "brain_mark_belief", "brain_list_artifacts", "brain_mark_artifact",
+        "brain_resolve_artifact", "brain_entity_graph", "brain_synthesize",
+        "brain_user_profile", "brain_compose_query",
+    },
+    "research_or_epistemic": {
+        "brain_epistemic", "brain_research", "brain_recall",
+        "brain_compose_query", "brain_entity_graph", "brain_synthesize",
+    },
+    "continuation_or_resume": {
+        "brain_recap", "brain_recall", "brain_reality_debug",
+        "brain_mark_belief", "brain_list_artifacts",
+    },
+    "document_intake": {
+        "brain_list_artifacts", "brain_mark_artifact", "brain_resolve_artifact",
+    },
+}
+
+
+def _summarize_tool_result(tool_name: str, args: Dict[str, Any], raw: str) -> str:
+    """Return a 1-line summary for weak-LLM readability. Empty string if unclear."""
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    if tool_name == "brain_recap":
+        items = data.get("recap") or data.get("episodes") or data.get("items") or []
+        n = len(items) if isinstance(items, list) else 0
+        return f"[brain_recap: {n} recent work items]" if n else "[brain_recap: no recent items]"
+    if tool_name == "brain_recall":
+        facts = data.get("facts") or data.get("results") or []
+        n = len(facts) if isinstance(facts, list) else 0
+        if n:
+            preview = str(facts[0])[:60] if isinstance(facts, list) and facts else ""
+            return f"[brain_recall: {n} matches. Top: {preview}]"
+        return "[brain_recall: no matches]"
+    if tool_name == "brain_reality_debug":
+        state = data.get("state") or {}
+        obj = (state.get("current_objective") or "") if isinstance(state, dict) else ""
+        loops = len(state.get("open_loops") or []) if isinstance(state, dict) else 0
+        return f"[brain_reality_debug: objective={obj[:40]}, {loops} open loops]"
+    if tool_name == "brain_mark_belief":
+        bid = data.get("belief_id") or data.get("id") or "?"
+        action = data.get("action") or "?"
+        return f"[brain_mark_belief: {action} belief {str(bid)[:12]}]"
+    if tool_name == "brain_list_artifacts":
+        arts = data.get("artifacts") or data.get("items") or []
+        n = len(arts) if isinstance(arts, list) else 0
+        return f"[brain_list_artifacts: {n} artifacts]" if n else "[brain_list_artifacts: none]"
+    if tool_name == "brain_mark_artifact":
+        role = data.get("role") or "?"
+        status = data.get("status") or "?"
+        return f"[brain_mark_artifact: {role} → {status}]"
+    if tool_name == "brain_resolve_artifact":
+        path = data.get("path") or data.get("resolved_path") or "?"
+        return f"[brain_resolve_artifact: {str(path)[:60]}]"
+    if tool_name == "brain_epistemic":
+        action = data.get("action") or "?"
+        facts = data.get("facts") or data.get("learned") or []
+        n = len(facts) if isinstance(facts, list) else 0
+        return f"[brain_epistemic: action={action}, {n} facts]"
+    if tool_name == "brain_research":
+        q = data.get("question") or args.get("question") or "?"
+        return f"[brain_research: {str(q)[:60]}]"
+    if tool_name == "brain_entity_graph":
+        action = data.get("action") or "?"
+        rel = data.get("relationships") or data.get("related") or []
+        n = len(rel) if isinstance(rel, list) else 0
+        return f"[brain_entity_graph: {action}, {n} related entities]"
+    if tool_name == "brain_synthesize":
+        sessions = data.get("sessions") or data.get("results") or []
+        n = len(sessions) if isinstance(sessions, list) else 0
+        return f"[brain_synthesize: {n} sessions analyzed]" if n else "[brain_synthesize: no patterns]"
+    if tool_name == "brain_self_evolution":
+        action = data.get("action") or "?"
+        proposals = data.get("proposals") or data.get("items") or []
+        n = len(proposals) if isinstance(proposals, list) else 0
+        return f"[brain_self_evolution: {action}, {n} proposals]"
+    if tool_name == "brain_user_profile":
+        action = data.get("action") or "?"
+        return f"[brain_user_profile: {action}]"
+    if tool_name == "brain_compose_query":
+        adds = len(args.get("add_concepts") or [])
+        subs = len(args.get("subtract_concepts") or [])
+        return f"[brain_compose_query: +{adds} -{subs} concepts]"
+    if tool_name in {"brain_state_debug", "brain_incident_truth_debug",
+                      "brain_trace_debug", "brain_graph_debug"}:
+        scope = data.get("scope_key") or data.get("query") or "?"
+        return f"[{tool_name}: {str(scope)[:50]}]"
+    return ""
+
+
 class LiveBrainProvider(MemoryProvider):
     def __init__(self):
         self._store = None
@@ -558,10 +661,7 @@ class LiveBrainProvider(MemoryProvider):
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         # P1.3: debug-only schemas are gated behind LIVE_BRAIN_EXPOSE_DEBUG_TOOLS.
-        # Handlers stay wired so the env var is a runtime toggle, not a feature
-        # flag that requires reload. Default off — these 4 tools added ~3 KB
-        # to every tool list and almost never improved a real answer.
-        schemas: List[Dict[str, Any]] = [
+        all_schemas: List[Dict[str, Any]] = [
             REALITY_DEBUG_SCHEMA,
             RECAP_SCHEMA,
             BELIEF_MARK_SCHEMA,
@@ -578,29 +678,44 @@ class LiveBrainProvider(MemoryProvider):
             COMPOSE_QUERY_SCHEMA,
         ]
         if os.environ.get("LIVE_BRAIN_EXPOSE_DEBUG_TOOLS", "").strip().lower() in {"1", "true", "yes", "on"}:
-            schemas.extend([
+            all_schemas.extend([
                 STATE_DEBUG_SCHEMA,
                 INCIDENT_TRUTH_DEBUG_SCHEMA,
                 TRACE_DEBUG_SCHEMA,
                 GRAPH_DEBUG_SCHEMA,
             ])
-        return schemas
+        # P2.7: lane-gated tool visibility — only 3-6 tools per turn lane
+        lane = self._cached_turn_lane()
+        if lane and lane in _LANE_TOOL_NAMES:
+            allowed = _LANE_TOOL_NAMES[lane]
+            return [s for s in all_schemas if s.get("name", "") in allowed]
+        return all_schemas
+
+    def _cached_turn_lane(self) -> str:
+        """Read the turn lane from the live_brain_ctx bridge (previous turn)."""
+        try:
+            from live_brain_ctx.modules.bridge import get_scope
+            scope = get_scope(self._session_id or "")
+            return scope.get("turn_lane", "")
+        except Exception:
+            return ""
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         """Dispatch ``tool_name`` to its registered handler.
 
         The 15 ``brain_*`` tools each have a dedicated ``_handle_<suffix>``
-        method. This method builds the dispatch table lazily (so it doesn't
-        run before ``initialize``) and routes calls. Central
-        ``self._store`` readiness check is done once here rather than in
-        every branch.
+        method. P2.8: result compression — 1-line summary prepended for weak LLMs.
         """
         if not self._store:
             return tool_error("Live brain store is not initialized")
         handler = self._tool_handlers().get(tool_name)
         if handler is None:
             return tool_error(f"Unknown tool: {tool_name}")
-        return handler(args)
+        raw = handler(args)
+        summary = _summarize_tool_result(tool_name, args, raw)
+        if summary:
+            return summary + "\n" + raw
+        return raw
 
     def _tool_handlers(self) -> Dict[str, Any]:
         """Lazy-built dispatch map from ``brain_*`` tool names to handlers."""

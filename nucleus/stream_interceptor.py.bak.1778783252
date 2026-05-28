@@ -1,0 +1,300 @@
+"""Stream Interceptor — Wraps LLM stream callbacks for real-time analysis.
+
+Collects tokens as they arrive, detects code blocks,
+buffers them, and validates via code_validator.
+If an error is detected, signals the agent to interrupt
+and stores a correction.
+"""
+
+import logging
+import re
+import time
+from typing import Any, Callable, Dict, List, Optional
+
+logger = logging.getLogger("nucleus.stream_interceptor")
+
+_CODE_BLOCK_RE = re.compile(r"```(\w*)", re.MULTILINE)
+_LANGUAGE_ALIASES = {
+    "py": "python",
+    "js": "javascript",
+    "ts": "typescript",
+    "sh": "bash",
+    "bash": "bash",
+    "shell": "bash",
+    "yaml": "yaml",
+    "yml": "yaml",
+    "json": "json",
+    "html": "html",
+    "css": "css",
+    "sql": "sql",
+    "rs": "rust",
+    "go": "go",
+    "rb": "ruby",
+    "php": "php",
+    "c": "c",
+    "cpp": "cpp",
+    "java": "java",
+    "kt": "kotlin",
+    "swift": "swift",
+}
+
+
+class InterceptedBlock:
+    """Represents a detected code block within the stream."""
+
+    def __init__(self, language: str, start_line: int):
+        self.language = language
+        self.start_line = start_line
+        self.lines: List[str] = []
+        self.buffer = ""
+        self.closed = False
+        self.errors: List[Dict] = []
+        self.validated = False
+
+    def add_line(self, line: str):
+        self.lines.append(line)
+        self.buffer += line + "\n"
+
+    def close(self):
+        self.closed = True
+
+    @property
+    def code(self) -> str:
+        return "\n".join(self.lines)
+
+
+class StreamInterceptor:
+    """Wraps an LLM stream callback to analyze tokens in real-time.
+
+    Usage:
+        interceptor = StreamInterceptor(original_callback, agent_ref)
+        kwargs['stream_callback'] = interceptor
+    """
+
+    def __init__(
+        self,
+        original_callback: Optional[Callable] = None,
+        agent_ref: Any = None,
+        code_validator=None,
+        grounding_engine=None,
+    ):
+        self.original_callback = original_callback
+        self.agent_ref = agent_ref
+        self.validator = code_validator
+        self.grounding = grounding_engine
+
+        self.full_text: List[str] = []
+        self.current_block: Optional[InterceptedBlock] = None
+        self.blocks: List[InterceptedBlock] = []
+        self.line_number = 0
+        self.char_count = 0
+
+        self.interrupted = False
+        self.interruption_reason: Optional[str] = None
+        self.interruption_correction: Optional[str] = None
+        self.interruption_errors: List[Dict] = []
+
+        self.block_depth = 0
+        self.partial_line = ""
+
+    def __call__(self, text: str) -> None:
+        if self.interrupted:
+            return
+
+        self.char_count += len(text)
+        self.full_text.append(text)
+
+        if self.original_callback:
+            try:
+                self.original_callback(text)
+            except Exception as e:
+                logger.debug("[interceptor] original callback error: %s", e)
+
+        self._process_text(text)
+
+    def reset(self):
+        self.full_text = []
+        self.current_block = None
+        self.blocks = []
+        self.line_number = 0
+        self.char_count = 0
+        self.interrupted = False
+        self.interruption_reason = None
+        self.interruption_correction = None
+        self.interruption_errors = []
+        self.block_depth = 0
+        self.partial_line = ""
+
+    def _process_text(self, text: str):
+        lines = (self.partial_line + text).split("\n")
+        self.partial_line = lines.pop() if text and not text.endswith("\n") else ""
+
+        for i, line in enumerate(lines):
+            if not line and not lines[-1]:
+                continue
+            if i == 0 and self.partial_line and not text.endswith("\n"):
+                continue
+
+            effective_line_number = self.line_number
+            self.line_number += 1
+
+            self._process_line(line, effective_line_number)
+
+        if self.current_block and self.current_block.closed:
+            self._finalize_block()
+
+    def _process_line(self, line: str, line_number: int):
+        stripped = line.strip()
+        match = _CODE_BLOCK_RE.match(stripped)
+
+        if match:
+            fence_lang = match.group(1).lower()
+            alias = _LANGUAGE_ALIASES.get(fence_lang, fence_lang)
+
+            if self.block_depth == 0:
+                self.block_depth = 1
+                self.current_block = InterceptedBlock(
+                    language=alias or "unknown",
+                    start_line=line_number,
+                )
+            else:
+                self.block_depth = 0
+                if self.current_block:
+                    self.current_block.close()
+        else:
+            if self.current_block and not self.current_block.closed:
+                self.current_block.add_line(line)
+
+    def _finalize_block(self):
+        block = self.current_block
+        if not block or not block.code.strip():
+            self.current_block = None
+            return
+
+        if self.validator and block.language == "python":
+            errors = self.validator.validate(block.code)
+            block.errors = errors
+            block.validated = True
+
+            fatal_errors = [e for e in errors if e.get("severity", "error") == "error"]
+            if fatal_errors:
+                self.interruption_errors.extend(fatal_errors)
+                self.interruption_reason = f"code_validation_error:{block.language}"
+                logger.info(
+                    "[interceptor] found %d error(s) in %s block (line %d) — NOT interrupting, will warn",
+                    len(fatal_errors), block.language, block.start_line,
+                )
+
+        if self.grounding and block.language == "python":
+            results = self.grounding.ground_code_block(block.code, block.language)
+            execution_results = [r for r in results if r.grounding_type == "execution"]
+            if execution_results and not execution_results[0].success:
+                self.interruption_errors.append({
+                    "line": 0, "col": 0,
+                    "message": f"Execution failed: {execution_results[0].error}",
+                    "severity": "warning",
+                })
+                logger.info(
+                    "[interceptor] execution failed in %s block: %s — NOT interrupting, will warn",
+                    block.language, execution_results[0].error[:80],
+                )
+
+        self.blocks.append(block)
+        self.current_block = None
+
+    def _build_grounding_correction(self, result) -> str:
+        return (
+            "**[NUCLEUS INTERVENTION — CODE EXECUTION FAILED]**\n\n"
+            f"Error: {result.error}\n\n"
+            "The generated code does not execute correctly. "
+            "Please fix the issue and regenerate."
+        )
+
+    def _build_correction(self, language: str, errors: List[Dict]) -> str:
+        lines = [
+            "**[NUCLEUS INTERVENTION — CODE VALIDATION FAILED]**",
+            "",
+        ]
+        for err in errors[:5]:
+            lines.append(f"- Line {err.get('line', '?')}: {err.get('message', 'unknown error')}")
+        lines.append("")
+        lines.append("The generated code contains errors and was blocked.")
+        lines.append("Please review the errors above and fix them.")
+        return "\n".join(lines)
+
+    @property
+    def full_response(self) -> str:
+        return "".join(self.full_text)
+
+    def get_code_blocks(self, language: Optional[str] = None) -> List[Dict]:
+        result = []
+        for block in self.blocks:
+            if language and block.language != language:
+                continue
+            result.append({
+                "language": block.language,
+                "start_line": block.start_line,
+                "code": block.code,
+                "errors": block.errors,
+                "validated": block.validated,
+            })
+        return result
+
+    def has_fatal_errors(self) -> bool:
+        return bool(self.interruption_errors)
+
+
+def intercept_run_conversation(original_fn):
+    """Decorator that wraps run_conversation to add stream interception.
+
+    Usage:
+        @intercept_run_conversation
+        def patched_run_conversation(self, user_message, *args, **kwargs):
+            ...
+    """
+    from .code_validator import CodeValidator
+
+    def wrapper(self, user_message, *args, **kwargs):
+        original_stream = kwargs.get("stream_callback")
+        validator = CodeValidator()
+        from .grounding_engine import GroundingEngine
+        grounding = GroundingEngine()
+        interceptor = StreamInterceptor(
+            original_callback=original_stream,
+            agent_ref=self,
+            code_validator=validator,
+            grounding_engine=grounding,
+        )
+
+        kwargs["stream_callback"] = interceptor
+
+        try:
+            result = original_fn(self, user_message, *args, **kwargs)
+        except Exception as e:
+            logger.error("[interceptor] run_conversation exception: %s", e)
+            interceptor.interrupted = True
+            interceptor.interruption_reason = f"exception:{e}"
+            return {
+                "final_response": f"[NUCLEUS INTERVENTION] Agent exception: {e}",
+                "completed": True,
+                "interrupted": True,
+            }
+
+        if interceptor.interruption_errors:
+            original_response = result.get("final_response", "")
+            warning = "\n\n**[NUCLEUS WARNING]**\n"
+            for err in interceptor.interruption_errors[:3]:
+                warning += f"- {err.get('message', 'unknown error')}\n"
+            result["final_response"] = original_response + warning
+            result["interception"] = {
+                "reason": interceptor.interruption_reason or "code_warning",
+                "errors": interceptor.interruption_errors,
+            }
+            logger.info(
+                "[interceptor] warning appended: %d issue(s)",
+                len(interceptor.interruption_errors),
+            )
+
+        return result
+
+    return wrapper
