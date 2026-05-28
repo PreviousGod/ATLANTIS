@@ -59,17 +59,69 @@ You MUST use brain_epistemic(action=search_web) or explicitly state "I don't hav
 # ---------------------------------------------------------------------------
 
 _COMPLEX_SIGNALS = re.compile(
-    r'\b(zašto|why|kako|how|debug|fix|error|ne radi|doesn.t work|fails?|broke|implement|architect|design|compare|analyze|explain why|root cause|difference between|почему|як|чому|как|не работает|не працює|ошибка|помилка|pregledaj|analiziraj|proveri|popravi|review|examine|inspect|investigate|refactor|optimize|upgrade|enhance|migrate|redesign|objasni|explain|razliku|difference|odradi|uradi|sredi|napravi|build|create|make|write|add|put)\b',
+    r'\b(?:'
+    # Serbian / Croatian / Bosnian
+    r'zašto|zasto|kako|ne radi|ne radi|ne valja|pregledaj|analiziraj|proveri|provjeri|'
+    r'popravi|objasni|razliku|odradi|uradi|sredi|napravi|ispravi|greška|greska|bag|'
+    # Russian
+    r'почему|pochemu|как|kak|не работает|ne rabotaet|не запускается|ne zapuskaetsya|'
+    r'ошибка|oshibka|баг|bag|сломалось|slomalos|поломалось|polomalos|'
+    r'исправь|isprav|почини|pochini|сделай|sdelai|проверь|prover|анализируй|analizirui|'
+    r'объясни|obyasni|разберись|razberis|напиши|napishi|добавь|dobav|'
+    r'перепиши|perepishi|оптимизируй|optimizirui|рефакторинг|refaktoring|'
+    r'спроектируй|sproektirui|архитектура|arkhitektura|сравни|sravni|'
+    r'улучши|uluchshi|обнови|obnovi|мигрируй|migrirui|'
+    # Ukrainian
+    r'чому|chomu|як|iak|не працює|ne pratsiuie|не запускається|ne zapuskaietsia|'
+    r'помилка|pomylka|баг|bag|зламалось|zlamalos|поламалось|polamalos|'
+    r'виправ|vyprav|полагодь|polahod|зроби|zroby|перевір|perevir|аналізуй|analizui|'
+    r'поясни|poiasny|розберись|rozberys|напиши|napyshy|додай|dodai|'
+    r'перепиши|perepyshy|оптимізуй|optymizui|рефакторинг|refaktoryng|'
+    r'спроектуй|sproektui|архітектура|arkhitektura|порівняй|porivniai|'
+    r'покращ|pokrashch|онови|onovy|мігруй|mihrui|'
+    # English
+    r'why|how|debug|fix|error|fails?|broke|implement|architect|design|compare|'
+    r'analyze|explain why|root cause|difference between|review|examine|inspect|'
+    r'investigate|refactor|optimize|upgrade|enhance|migrate|redesign|explain|'
+    r'difference|build|create|make|write|add|put'
+    r')\b',
     re.IGNORECASE,
 )
 
 _TRIVIAL_SIGNALS = re.compile(
-    r'^(da|ne|ok|hvala|thanks|yes|no|got it|važi|aha|razumem|nastavi|continue|skip|next|да|нет|ні|так|добре|дякую|спасибо|продолжай|далі)\s*[.!?]?$',
+    r'^(?:'
+    # Serbian
+    r'da|ne|ok|hvala|važi|vazi|aha|razumem|nastavi|'
+    # Russian
+    r'да|da|нет|net|ok|ок|ага|aga|угу|uhu|спасибо|spasibo|'
+    r'хорошо|horosho|ладно|ladno|понятно|ponyatno|продолжай|prodolzhai|'
+    r'давай|davai|дальше|dalshe|'
+    # Ukrainian
+    r'так|tak|ні|ni|добре|dobre|гаразд|harazd|дякую|diakuiu|'
+    r'зрозуміло|zrozumilo|продовжуй|prodovzhui|далі|dali|'
+    # English
+    r'yes|no|ok|thanks|got it|continue|skip|next'
+    r')\s*[.!?]?$',
     re.IGNORECASE,
 )
 
 _REFLECTIVE_SIGNALS = re.compile(
-    r'\b(misliš|mislis|šta misliš|šta mislis|kako ti se|cini|oceni|proceni|reci mi|tvoje mišljenje|tvoje misljenje|evaluation|review|assess|thoughts?|opinion|what do you think|how do you feel about|rate|grade|your take)\b',
+    r'\b(?:'
+    # Serbian
+    r'misliš|mislis|šta misliš|sta mislis|kako ti se|cini|oceni|proceni|'
+    r'reci mi|tvoje mišljenje|tvoje misljenje|šta bi ti|sta bi ti|'
+    # Russian
+    r'что думаешь|chto dumaesh|как тебе|kak tebe|тво[её] мнение|tvoe mnenie|'
+    r'оцени|otseni|проанализируй|proanalizirui|что скажешь|chto skazhesh|'
+    r'как считаешь|kak schitaesh|твой вердикт|tvoi verdikt|'
+    # Ukrainian
+    r'що думаєш|shcho dumaiesh|як тобі|iak tobi|твоя думка|tvoia dumka|'
+    r'оціни|otsiny|проаналізуй|proanalizui|що скажеш|shcho skazhesh|'
+    r'як вважаєш|iak vvazhaiesh|твій вердикт|tvii verdikt|'
+    # English
+    r'evaluation|review|assess|thoughts?|opinion|'
+    r'what do you think|how do you feel about|rate|grade|your take'
+    r')\b',
     re.IGNORECASE,
 )
 
@@ -306,18 +358,57 @@ _ATTACK_BLOCK_RE = re.compile(r'<attack>(.*?)</attack>', re.DOTALL | re.IGNORECA
 
 # Concrete criticism signals — presence of ANY = likely valid attack
 _ATTACK_CRITICISM_SIGNALS = re.compile(
-    r'\b(flaws?|wrong|incorrect|invalid|breaks?|broken|edge case|missed|simpler|assumption|weakness|gap|hole|problems?|issues?|limitation|contradiction|errors?|mistakes?|fails?|failures?|risks?|concerns?|critiques?|criticism|overlooked|naive|fragile|brittle|incomplete|insufficient|unverified|untested|unreliable|bias|skewed)\b',
+    r'\b(?:'
+    # English
+    r'flaws?|wrong|incorrect|invalid|breaks?|broken|edge case|missed|simpler|'
+    r'assumption|weakness|gap|hole|problems?|issues?|limitation|contradiction|'
+    r'errors?|mistakes?|fails?|failures?|risks?|concerns?|critiques?|criticism|'
+    r'overlooked|naive|fragile|brittle|incomplete|insufficient|unverified|'
+    r'untested|unreliable|bias|skewed|'
+    # Russian
+    r'недостат|nedostat|ошибк|oshibk|проблем|problem|сломан|sloman|'
+    r'не работает|ne rabotaet|неверн|nevern|неправильн|nepraviln|'
+    r'не учтено|ne uchteno|упущен|upushchen|противореч|protivorech|'
+    r'допущен|dopushchen|слаб|slab|хрупк|khrupk|наивн|naivn|'
+    r'неполн|nepoln|недостаточн|nedostatochn|не проверен|ne proveren|'
+    r'ненадёж|nenadezh|предвзят|predvzyat|искажён|iskazhen|'
+    # Ukrainian
+    r'недолік|nedolik|помилк|pomylk|проблем|problem|зламан|zlaman|'
+    r'не працює|ne pratsiuie|невірн|nevirn|неправильн|nepravyln|'
+    r'не врахован|ne vrakhovan|упущен|upushchen|супереч|superech|'
+    r'допущен|dopushchen|слабк|slabk|крихк|krykhk|наївн|naivn|'
+    r'неповн|nepovn|недостатн|nedostatn|не перевірен|ne pereviren|'
+    r'ненадійн|nenadiin|упереджен|uperedzhen|спотворен|spotvoren'
+    r')\b',
     re.IGNORECASE,
 )
 
 # Generic praise / empty attack signals — if ONLY these present = invalid
 _ATTACK_PRAISE_SIGNALS = re.compile(
-    r'\b(good|great|excellent|perfect|sound|solid|valid|correct|strong|robust|well-done|flawless|no issues|no problems|no flaws)\b',
+    r'\b(?:'
+    # English
+    r'good|great|excellent|perfect|sound|solid|valid|correct|strong|robust|'
+    r'well-done|flawless|no issues|no problems|no flaws|'
+    # Russian
+    r'хорош|horosh|отличн|otlichn|прекрасн|prekrasn|идеальн|idealn|'
+    r'правильн|praviln|верн|vern|надёжн|nadezhn|без ошибок|bez oshibok|'
+    r'нет проблем|net problem|всё верно|vsyo verno|всё правильно|vsyo pravilno|'
+    # Ukrainian
+    r'добр|dobr|гарн|harn|чудов|chudov|відмінн|vidminn|прекрасн|prekrasn|'
+    r'ідеальн|idealn|правильн|pravyln|вірн|virn|надійн|nadiin|'
+    r'без помилок|bez pomylok|нема проблем|nema problem|все вірно|vse virno'
+    r')\b',
     re.IGNORECASE,
 )
 
 # Numbered flaws = strong indicator of real attack
-_ATTACK_NUMBERED_FLAW = re.compile(r'(?:flaw|issue|problem)\s*#?\s*\d+', re.IGNORECASE)
+_ATTACK_NUMBERED_FLAW = re.compile(
+    r'(?:flaw|issue|problem|'
+    r'недостаток|nedostatok|проблема|problema|ошибка|oshibka|'
+    r'недолік|nedolik|проблема|problema|помилка|pomylka'
+    r')\s*#?\s*\d+',
+    re.IGNORECASE,
+)
 
 
 def check_attack_quality(response: str) -> Tuple[bool, str]:
