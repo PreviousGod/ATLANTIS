@@ -635,12 +635,78 @@ def _post_tool_hook(tool_name=None, tool_result=None, result=None, session_id=No
         return None
 
 
+def _check_response_drift(user_message: str, assistant_response: str, session_id: str) -> None:
+    """Detect when the LLM's response has nothing to do with the user's message.
+
+    If the user said something short (<150 chars) and the response is long
+    (>300 chars) with minimal word overlap, queue a drift warning for the
+    next turn. Pure rule-based — 0 LLM calls.
+    """
+    if len(user_message) > 150 or len(assistant_response) < 300:
+        return
+    if not session_id:
+        return
+
+    import re
+    # Extract meaningful words (3+ chars, no stopwords)
+    def _words(text):
+        stop = {'the', 'and', 'for', 'that', 'this', 'with', 'from', 'your',
+                'have', 'are', 'was', 'not', 'you', 'what', 'how', 'can',
+                'je', 'si', 'se', 'da', 'ne', 'na', 'za', 'od', 'do', 'u',
+                'sam', 'smo', 'ti', 'mi', 'to', 'što', 'sto', 'koji', 'kao',
+                'će', 'ce', 'bi', 'li', 'sve', 'sad', 'samo', 'još', 'jos',
+                'i', 'a', 'o', 'e', 'ili', 'ali', 'pa', 'te', 'me', 'ga',
+                'это', 'что', 'как', 'для', 'все', 'уже', 'еще', 'или',
+                'це', 'що', 'як', 'для', 'все', 'вже', 'ще', 'або',
+                'the', 'is', 'it', 'of', 'in', 'to', 'be', 'on', 'at'}
+        found = set()
+        for w in re.findall(r'[\wćčšđžĆČŠĐŽ]{3,}', text.lower()):
+            if w not in stop:
+                found.add(w)
+        return found
+
+    user_words = _words(user_message)
+    resp_words = _words(assistant_response)
+
+    if not user_words:
+        return
+
+    overlap = user_words & resp_words
+    if len(overlap) >= 2:
+        return  # enough overlap — response is on-topic
+
+    # Drift detected — queue warning for next turn
+    drift_msg = (
+        "NUCLEUS DRIFT WARNING:\n"
+        f"Your last response ({len(assistant_response)} chars) showed minimal overlap "
+        f"with the user's message ({len(user_message)} chars).\n"
+        f"User words: {', '.join(sorted(user_words)[:10])}\n"
+        f"Response words: {', '.join(sorted(resp_words)[:10])}\n"
+        "STAY ON TOPIC. Answer ONLY what the user asked. Do NOT invent new subjects."
+    )
+
+    try:
+        from .session_state import get_session_state
+        state = get_session_state()
+        state.queue_warning(session_id, {
+            "pattern": "response_drift",
+            "message": drift_msg,
+            "confidence": 0.85,
+        })
+    except Exception:
+        pass
+
+
 def _post_llm_hook(user_message=None, assistant_response=None, **kwargs):
-    """Hook: trigger background research when the LLM exposes an epistemic gap."""
+    """Hook: trigger background research + detect response drift (hallucination guard)."""
     if not user_message or not assistant_response:
         return None
     try:
         sid = str(kwargs.get("session_id") or "")
+
+        # P2.10: response drift detector. If the user said something short
+        # and the response is long + completely unrelated, warn on next turn.
+        _check_response_drift(user_message, assistant_response, sid)
         turn_lane = ''
         try:
             from live_brain_ctx.modules.hooks import get_turn_lane  # type: ignore
