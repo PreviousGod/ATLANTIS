@@ -474,6 +474,9 @@ def _pre_llm_hook(session_id=None, user_message=None, **kwargs):
     sid = str(session_id or "")
     msg = str(user_message)
 
+    # P2.11: reset in-turn tool call counters on each user message
+    _reset_in_turn_counts(sid)
+
     # Update SessionState with the user message — emission logic in
     # nucleus.contributions reads from this state via drain_warnings(),
     # ProactiveSuggester, etc.
@@ -531,6 +534,55 @@ def _resolve_session_id(session_id, state, task_id=None) -> str:
     return ""
 
 
+# P2.11: per-session, in-turn tool call counter. Reset on each user turn.
+_IN_TURN_TOOL_COUNTS: Dict[str, Dict[str, int]] = {}
+_IN_TURN_TOOL_COUNTS_LOCK = threading.Lock()
+
+
+def _reset_in_turn_counts(session_id: str) -> None:
+    with _IN_TURN_TOOL_COUNTS_LOCK:
+        _IN_TURN_TOOL_COUNTS.pop(session_id, None)
+
+
+def _bump_in_turn_count(session_id: str, tool_name: str) -> int:
+    with _IN_TURN_TOOL_COUNTS_LOCK:
+        counts = _IN_TURN_TOOL_COUNTS.setdefault(session_id, {})
+        counts[tool_name] = counts.get(tool_name, 0) + 1
+        return counts[tool_name]
+
+
+def _check_in_turn_spiral(tool_name: str, session_id: str, state) -> dict | None:
+    """If the same tool has been called 5+ times this turn, inject a warning.
+
+    Returns a context dict Hermes core will surface to the LLM before
+    this tool executes. Returns None if the count is below threshold.
+    """
+    if not session_id or not tool_name:
+        return None
+    with _IN_TURN_TOOL_COUNTS_LOCK:
+        count = _IN_TURN_TOOL_COUNTS.get(session_id, {}).get(tool_name, 0)
+    if count < 5:
+        return None
+    if count == 5:
+        msg = (
+            f"NUCLEUS SPIRAL WARNING: {count} calls to '{tool_name}' this turn.\n"
+            "STOP calling tools. You are in a loop.\n"
+            "Respond to the user NOW with what you know and what's blocking you."
+        )
+    elif count >= 10:
+        msg = (
+            f"NUCLEUS CRITICAL: {count} calls to '{tool_name}' this turn.\n"
+            "STOP IMMEDIATELY. Do NOT call another tool.\n"
+            "Tell the user exactly what failed and ask for direction."
+        )
+    else:
+        msg = (
+            f"NUCLEUS WARNING: {count} calls to '{tool_name}' this turn.\n"
+            "Consider stopping tool calls and explaining the situation."
+        )
+    return {"context": msg}
+
+
 def _pre_tool_hook(tool_name=None, args=None, session_id=None, **kwargs):
     """Hook: veto tool calls that match known mistake patterns."""
     if not tool_name:
@@ -581,6 +633,14 @@ def _pre_tool_hook(tool_name=None, args=None, session_id=None, **kwargs):
             tool_name, intervention.get("pattern"), intervention.get("confidence", 0),
         )
         return None
+        # P2.11: in-turn tool spiral detection. When 5+ calls of the same
+        # tool happen in a single turn without a user message between them,
+        # inject an immediate warning the LLM sees before the next tool call.
+        spiral_warning = _check_in_turn_spiral(tool_name, sid, state)
+        if spiral_warning:
+            return spiral_warning
+
+        return None
     except Exception as e:
         log.warning("_pre_tool_hook failed: %s", e)
         return None
@@ -599,6 +659,9 @@ def _post_tool_hook(tool_name=None, tool_result=None, result=None, session_id=No
         if not sid:
             return None
         state.on_post_tool(tool_name, tool_output, sid)
+
+        # P2.11: track in-turn tool call counts for spiral detection
+        _bump_in_turn_count(sid, tool_name)
 
         nucleus = _get_nucleus()
         # If a tool succeeded, record it as a known solution pattern
