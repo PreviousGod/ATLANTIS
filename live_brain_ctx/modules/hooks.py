@@ -3794,12 +3794,14 @@ def _build_auto_task_graph(scope_key: str, user_message: str, session_id: str) -
         conn.row_factory = sqlite3.Row
         tg = TaskGraph(conn)
 
-        # Auto-create graph if none exists and message is task-like
+        # Auto-create graph ONLY if none exists. REUSE existing graphs
+        # so failure history persists across sessions.
         graphs = tg.active_graphs(scope_key)
         if not graphs and len(user_message) > 10:
-            # Create from auto-detected template
             tg.plan(user_message[:120], scope_key, template_key="")
             logger.info("[LIVE_BRAIN_CTX] auto-created task graph for: %s", user_message[:80])
+        elif graphs:
+            logger.info("[LIVE_BRAIN_CTX] reusing existing task graph: %d active", len(graphs))
 
         result = tg.current_task_context(scope_key)
         conn.close()

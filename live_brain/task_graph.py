@@ -414,14 +414,27 @@ class TaskGraph:
 
         lines = ["CURRENT TASK:"]
         for g in graphs[:3]:
+            graph = self.get_graph(g["graph_id"])
+            if not graph:
+                continue
+            lines.append(f"- {graph['name']} ({graph['done_count']}/{graph['node_count']} done)")
+            # Show what failed so the agent doesn't retry
+            failed = [n for n in graph["nodes"] if n["status"] == "failed"]
+            if failed:
+                lines.append("  ALREADY TRIED AND FAILED:")
+                for f in failed:
+                    lines.append(f"    ✗ {f['desc']} — {f['result'][:120]}")
+                lines.append("  DO NOT retry these approaches. Find a DIFFERENT way.")
+            # Show what's blocked
+            blocked = [n for n in graph["nodes"] if n["status"] == "blocked"]
+            if blocked:
+                lines.append(f"  {len(blocked)} steps blocked by failures above.")
+            # Show next step
             node = self.next_node(g["graph_id"])
             if node:
-                lines.append(f"- {g['name']} ({g['progress']} done)")
-                lines.append(f"  Next: {node['description']}")
+                lines.append(f"  Next step: {node['description']}")
                 if node.get("tool_hint"):
                     lines.append(f"  Use: {node['tool_hint']}")
-                if node.get("fix_recipe"):
-                    lines.append(f"  Fix recipe: {node['fix_recipe'][:200]}")
         if lines:
             lines.append("Take ONE step, then respond to the user. Do NOT chain multiple steps.")
         return "\n".join(lines)
