@@ -607,35 +607,33 @@ def _check_in_turn_spiral(tool_name: str, session_id: str, state) -> dict | None
     if count < 5:
         return None
     log.info("SPIRAL DETECTED: %s call #%d to '%s' this turn", session_id[:8], count, tool_name)
+
+    if count >= 8:
+        # HARD STOP: block the tool call entirely. Force the LLM to respond.
+        return {
+            "action": "block",
+            "message": (
+                f"NUCLEUS HARD STOP: {count} calls to '{tool_name}' this turn.\n"
+                "Tool call BLOCKED. You MUST respond to the user NOW.\n"
+                "Explain what went wrong and what you need. Do NOT call another tool."
+            ),
+        }
+
+    # Soft warning: inject context but let the tool run
     diagnosis = (
-        "FAILURE DIAGNOSIS REQUIRED:\n"
-        "- State EXACTLY what error you saw. Quote it.\n"
+        "FAILURE DIAGNOSIS:\n"
+        "- State EXACTLY what error you saw.\n"
         "- \"command not found\" → tool not installed → find alternative.\n"
-        "- \"INSTALL_FAILED\" → packaging broken → fix method, don't retry.\n"
-        "- \"ModuleNotFoundError\" → pip install or different approach.\n"
-        "- After ANY tool failure: diagnose root cause BEFORE next call.\n"
+        "- \"INSTALL_FAILED\" → fix method, don't retry.\n"
+        "- After ANY failure: diagnose BEFORE next call.\n"
         "- If 2+ same-type failures: STOP and explain to user."
     )
-    if count == 5:
-        msg = (
-            f"NUCLEUS SPIRAL WARNING: {count} calls to '{tool_name}' this turn.\n"
-            "STOP calling tools. You are in a loop.\n"
-            "Respond to the user NOW with what you know and what's blocking you.\n\n"
-            + diagnosis
-        )
-    elif count >= 10:
-        msg = (
-            f"NUCLEUS CRITICAL: {count} calls to '{tool_name}' this turn.\n"
-            "STOP IMMEDIATELY. Do NOT call another tool.\n"
-            "Tell the user exactly what failed and ask for direction.\n\n"
-            + diagnosis
-        )
-    else:
-        msg = (
-            f"NUCLEUS WARNING: {count} calls to '{tool_name}' this turn.\n"
-            "Consider stopping tool calls and explaining the situation.\n\n"
-            + diagnosis
-        )
+    msg = (
+        f"NUCLEUS SPIRAL WARNING: {count} calls to '{tool_name}' this turn.\n"
+        "You are in a loop. STOP calling tools.\n"
+        "Respond to the user NOW with what you know.\n\n"
+        + diagnosis
+    )
     return {"context": msg}
 
 
