@@ -3643,6 +3643,111 @@ def _build_turn_economy_section(*, session_id: str, scope_key: str, turn_lane: s
                 pass
 
 
+_LANE_PREFILLS = {
+    "simple_execution": (
+        "TASK MODE:\n"
+        "CHECK: [what do I know from the context above?]\n"
+        "DO: [one action — the simplest thing that moves this forward]\n"
+        "Do NOT research, explore, or overthink. Execute and report."
+    ),
+    "deep_execution": (
+        "BUILD MODE:\n"
+        "DECOMPOSE: [break into sub-problems]\n"
+        "VERIFY: [what facts support each step?]\n"
+        "BUILD: [implement the solution]\n"
+        "If a tool fails: diagnose WHY before retrying."
+    ),
+    "research_or_epistemic": (
+        "RESEARCH MODE:\n"
+        "QUESTION: [what specific question needs answering?]\n"
+        "SOURCES: [where to find authoritative answers]\n"
+        "SYNTHESIZE: [combine findings into a verified answer]\n"
+        "Use brain_epistemic for current/high-stakes facts."
+    ),
+    "continuation_or_resume": (
+        "CONTINUE MODE:\n"
+        "STATE: [where did we leave off?]\n"
+        "NEXT: [one concrete step forward]\n"
+        "Ask the user if direction is unclear."
+    ),
+    "document_intake": (
+        "DOCUMENT MODE:\n"
+        "EXTRACT: [what information is in this document?]\n"
+        "TRANSFORM: [what needs to change?]\n"
+        "DO NOT widen into unrelated tasks."
+    ),
+}
+
+
+def _build_lane_prefill(turn_lane: str) -> str:
+    """Return lane-specific prefill block to focus the LLM on the right approach."""
+    return _LANE_PREFILLS.get(turn_lane, "")
+
+
+def _build_continuity_section(*, session_id: str, scope_key: str) -> str:
+    """Inject active task continuity for new/fresh sessions.
+
+    Queries live_brain work_state for active objectives/open_loops.
+    Only fires when the session is fresh (< 3 context_impressions)
+    so we don't re-inject stale state on every turn.
+    """
+    if not session_id or not scope_key:
+        return ""
+    db_path = _db_path()
+    if not Path(db_path).exists():
+        return ""
+    conn = None
+    try:
+        conn = _get_connection()
+        # Only for fresh sessions
+        row = conn.execute(
+            "SELECT COUNT(*) FROM context_impressions WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+        turn_count = int(row[0]) if row else 0
+        if turn_count > 3:
+            return ""
+
+        # Get work state
+        state_row = conn.execute(
+            "SELECT state_json FROM work_state WHERE scope_key=?",
+            (scope_key,),
+        ).fetchone()
+        if not state_row or not state_row[0]:
+            return ""
+
+        import json
+        state = json.loads(state_row[0]) if isinstance(state_row[0], str) else {}
+        if not isinstance(state, dict):
+            return ""
+
+        objective = state.get("current_objective", "")
+        open_loops = state.get("open_loops", [])
+        blockers = state.get("blockers", [])
+        if not objective and not open_loops and not blockers:
+            return ""
+
+        lines = ["CONTINUE FROM PREVIOUS SESSION:"]
+        if objective:
+            lines.append(f"- Objective: {str(objective)[:200]}")
+        if open_loops:
+            for loop in (open_loops if isinstance(open_loops, list) else [])[:3]:
+                lines.append(f"- Open loop: {str(loop)[:150]}")
+        if blockers:
+            for b in (blockers if isinstance(blockers, list) else [])[:3]:
+                lines.append(f"- Blocker: {str(b)[:150]}")
+        lines.append("Resume from where you left off, or ask the user for direction.")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def _pre_llm_call(**kwargs):
     try:
         return _pre_llm_call_inner(**kwargs)
@@ -3747,6 +3852,13 @@ def _pre_llm_call_inner(**kwargs):
         )
     except Exception as _exc:
         logger.debug("[LIVE_BRAIN_CTX] bridge.share_scope failed: %s", _exc)
+
+    # P3.4: proactive task continuation — inject active objectives
+    # when starting a fresh session so the agent resumes where it left off.
+    continuity = _build_continuity_section(session_id=session_id, scope_key=scope_key)
+    if continuity:
+        context = continuity
+
     if control.get('cancel'):
         _record_context_impression(
             scope_key,
@@ -4014,6 +4126,12 @@ def _pre_llm_call_inner(**kwargs):
     )
     if policy_block:
         context = (context + "\n\n" + policy_block) if context else policy_block
+
+    # P3.5: dynamic lane prefill — each lane gets a task-appropriate structure
+    if context or qctx.turn_lane != 'chit_chat':
+        lane_prefill = _build_lane_prefill(qctx.turn_lane)
+        if lane_prefill:
+            context = (lane_prefill + "\n\n" + context) if context else lane_prefill
 
     # P2.6: turn-economy stuck detector — escalating warnings at 3/8/15 turns
     if context and qctx.turn_lane in {'deep_execution', 'simple_execution', 'continuation_or_resume'}:

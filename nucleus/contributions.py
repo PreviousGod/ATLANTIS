@@ -42,6 +42,18 @@ def compute_contributions(**kwargs):
 
     out: List[ContextContribution] = []
 
+    # P4.1: drain verification flags from previous turn's mutations
+    from .__init__ import _drain_verification_flags
+    verify_msg = _drain_verification_flags(session_id)
+    if verify_msg:
+        out.append(ContextContribution(
+            plugin="nucleus",
+            section="VERIFY LAST CHANGE",
+            body=verify_msg,
+            priority=4,
+            dedupe_key=f"nucleus.verify:{session_id}",
+        ))
+
     # 0. Stuck detection (P2.6). Runs before warnings so the escape prompt
     # always ships — even if warnings also fire. Universal (all lanes).
     stuck_msg = _detect_stuck_loop(state, session_id)

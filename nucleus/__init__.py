@@ -539,6 +539,40 @@ def _resolve_session_id(session_id, state, task_id=None) -> str:
 _IN_TURN_TOOL_COUNTS: Dict[str, Dict[str, int]] = {}
 _IN_TURN_TOOL_COUNTS_LOCK = threading.Lock()
 
+# P4.1: per-session verification flags. Set when a mutation tool finishes.
+_PENDING_VERIFICATIONS: Dict[str, list] = {}
+_PENDING_VERIFICATIONS_LOCK = threading.Lock()
+
+
+def _flag_pending_verification(session_id: str, tool_name: str, result: str) -> None:
+    """Flag that the next turn should verify a mutation."""
+    if not session_id:
+        return
+    # Only flag if the tool result looks successful (no error)
+    result_str = str(result or "")[:500].lower()
+    if any(e in result_str for e in ("error", "failed", "exception", "traceback", "permission denied")):
+        return
+    with _PENDING_VERIFICATIONS_LOCK:
+        flags = _PENDING_VERIFICATIONS.setdefault(session_id, [])
+        flags.append({"tool": tool_name, "ts": time.time()})
+
+
+def _drain_verification_flags(session_id: str) -> str:
+    """Drain verification flags and return a VERIFY context block."""
+    with _PENDING_VERIFICATIONS_LOCK:
+        flags = _PENDING_VERIFICATIONS.pop(session_id, [])
+    if not flags:
+        return ""
+    count = len(flags)
+    tools = set(f["tool"] for f in flags)
+    return (
+        f"VERIFY YOUR LAST CHANGE:\n"
+        f"- You made {count} file mutation(s) with: {', '.join(tools)}\n"
+        f"- Did the change actually work? PROVE it.\n"
+        f"- Check the modified file, run a test, or explain exactly how you verified.\n"
+        f"- If you haven't verified it: do that before anything else."
+    )
+
 
 def _reset_in_turn_counts(session_id: str) -> None:
     with _IN_TURN_TOOL_COUNTS_LOCK:
@@ -674,6 +708,11 @@ def _post_tool_hook(tool_name=None, tool_result=None, result=None, session_id=No
 
         # P2.11: track in-turn tool call counts for spiral detection
         _bump_in_turn_count(sid, tool_name)
+
+        # P4.1: post-mutation verification flag. After write_file/patch,
+        # flag that the next turn should verify the change.
+        if tool_name in ("write_file", "patch"):
+            _flag_pending_verification(sid, tool_name, tool_output)
 
         nucleus = _get_nucleus()
         # If a tool succeeded, record it as a known solution pattern
