@@ -4001,8 +4001,7 @@ def _pre_llm_call_inner(**kwargs):
     # P3.4: proactive task continuation — inject active objectives
     # when starting a fresh session so the agent resumes where it left off.
     continuity = _build_continuity_section(session_id=session_id, scope_key=scope_key)
-    if continuity:
-        context = continuity
+    context = continuity if continuity else ""
 
     # P4.2: task graph context — auto-creates graph from user message.
     # No manual brain_task_graph calls needed. The agent just talks.
