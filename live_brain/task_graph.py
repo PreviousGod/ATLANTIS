@@ -185,7 +185,7 @@ class TaskGraph:
             tool_hint = step.get("tool") or ""
             tool_args = step.get("args") or ""
             self.conn.execute(
-                "INSERT INTO task_nodes (node_id, graph_id, description, status, dependencies, tool_hint, tool_args, order_index, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO task_nodes (node_id, graph_id, description, status, dependencies, fix_recipe, tool_hint, tool_args, order_index, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (node_id, graph_id, step["desc"], "pending", json.dumps(deps), "", tool_hint, tool_args, i+1, now, now),
             )
         if template:
