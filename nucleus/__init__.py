@@ -476,6 +476,7 @@ def _pre_llm_hook(session_id=None, user_message=None, **kwargs):
 
     # P2.11: reset in-turn tool call counters on each user message
     _reset_in_turn_counts(sid)
+    log.debug("SPIRAL reset counters for session %s", sid[:8])
 
     # Update SessionState with the user message — emission logic in
     # nucleus.contributions reads from this state via drain_warnings(),
@@ -563,6 +564,7 @@ def _check_in_turn_spiral(tool_name: str, session_id: str, state) -> dict | None
         count = _IN_TURN_TOOL_COUNTS.get(session_id, {}).get(tool_name, 0)
     if count < 5:
         return None
+    log.info("SPIRAL DETECTED: %s call #%d to '%s' this turn", session_id[:8], count, tool_name)
     if count == 5:
         msg = (
             f"NUCLEUS SPIRAL WARNING: {count} calls to '{tool_name}' this turn.\n"
@@ -594,6 +596,12 @@ def _pre_tool_hook(tool_name=None, args=None, session_id=None, **kwargs):
         sid = _resolve_session_id(session_id, state, kwargs.get("task_id"))
         if sid:
             state.on_pre_tool(tool_name, args or {}, sid)
+
+        # P2.11: in-turn tool spiral detection — runs BEFORE intervention
+        # so it fires regardless of whether the intervention engine matches.
+        spiral_warning = _check_in_turn_spiral(tool_name, sid, state)
+        if spiral_warning:
+            return spiral_warning
 
         from .intervention import InterventionEngine
         eng = InterventionEngine()
@@ -632,14 +640,6 @@ def _pre_tool_hook(tool_name=None, args=None, session_id=None, **kwargs):
             "INTERVENTION warned tool=%s pattern=%r confidence=%.2f",
             tool_name, intervention.get("pattern"), intervention.get("confidence", 0),
         )
-        return None
-        # P2.11: in-turn tool spiral detection. When 5+ calls of the same
-        # tool happen in a single turn without a user message between them,
-        # inject an immediate warning the LLM sees before the next tool call.
-        spiral_warning = _check_in_turn_spiral(tool_name, sid, state)
-        if spiral_warning:
-            return spiral_warning
-
         return None
     except Exception as e:
         log.warning("_pre_tool_hook failed: %s", e)
