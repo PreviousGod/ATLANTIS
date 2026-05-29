@@ -3684,6 +3684,99 @@ def _build_lane_prefill(turn_lane: str) -> str:
     return _LANE_PREFILLS.get(turn_lane, "")
 
 
+# P3.6: skill index — lazily built from SKILL.md files
+_SKILL_INDEX = None
+_SKILL_INDEX_LOCK = threading.Lock()
+_SKILL_INDEX_MTIME = 0.0
+
+
+def _build_skill_index():
+    """Lazily scan ~/.hermes/skills/ for SKILL.md files and build keyword→skill index."""
+    global _SKILL_INDEX, _SKILL_INDEX_MTIME
+    skills_dir = Path(_hermes_home()) / "skills"
+    if not skills_dir.exists():
+        return
+    try:
+        st = skills_dir.stat().st_mtime
+    except OSError:
+        return
+    with _SKILL_INDEX_LOCK:
+        if _SKILL_INDEX is not None and st == _SKILL_INDEX_MTIME:
+            return
+        index = {}
+        import yaml
+        for skill_md in skills_dir.rglob("SKILL.md"):
+            try:
+                text = skill_md.read_text(encoding="utf-8")
+                # Extract YAML frontmatter
+                if text.startswith("---"):
+                    parts = text.split("---", 2)
+                    if len(parts) >= 3:
+                        fm = yaml.safe_load(parts[1]) or {}
+                        name = fm.get("name", "")
+                        desc = fm.get("description", "")
+                        aliases = fm.get("aliases", [])
+                        tags = fm.get("tags", [])
+                        # Build keyword set
+                        keywords = set()
+                        if name:
+                            keywords.add(name.lower())
+                            keywords.update(name.lower().split("-"))
+                        if desc:
+                            keywords.update(w.lower() for w in desc.split()
+                                            if len(w) > 3 and w.isalpha())
+                        if aliases:
+                            keywords.update(str(a).lower() for a in aliases)
+                        if tags:
+                            keywords.update(str(t).lower() for t in tags)
+                        # Strip noise words
+                        noise = {"the", "and", "for", "with", "that", "this", "from",
+                                 "your", "have", "what", "when", "where", "which"}
+                        keywords = {k for k in keywords if k not in noise and len(k) > 2}
+                        if keywords and name:
+                            index[name] = {"description": desc[:120], "keywords": keywords}
+            except Exception:
+                pass
+        _SKILL_INDEX = index
+        _SKILL_INDEX_MTIME = st
+        logger.info("[LIVE_BRAIN_CTX] skill index built: %d skills", len(index))
+
+
+def _build_skill_hints_section(user_message: str) -> str:
+    """Scan user message against skill index and return RELEVANT SKILLS section."""
+    if not user_message or len(user_message) < 3:
+        return ""
+    _build_skill_index()
+    if not _SKILL_INDEX:
+        return ""
+    msg_lower = user_message.lower()
+    msg_words = set(msg_lower.split())
+    matches = []
+    for name, info in _SKILL_INDEX.items():
+        keywords = info["keywords"]
+        # Match if any keyword is in the message
+        overlap = keywords & msg_words
+        # Also check substring matches for multi-word keywords
+        if not overlap:
+            for kw in keywords:
+                if " " in kw and kw in msg_lower:
+                    overlap.add(kw)
+                elif len(kw) > 4 and kw in msg_lower:
+                    overlap.add(kw)
+        if overlap:
+            score = len(overlap)
+            matches.append((score, name, info["description"]))
+    if not matches:
+        return ""
+    matches.sort(reverse=True)
+    top = matches[:5]
+    lines = ["RELEVANT SKILLS:"]
+    for score, name, desc in top:
+        lines.append(f"- {name}: {desc}")
+    lines.append("Use skill_view to read the full skill before acting.")
+    return "\n".join(lines)
+
+
 def _build_continuity_section(*, session_id: str, scope_key: str) -> str:
     """Inject active task continuity for new/fresh sessions.
 
@@ -3858,6 +3951,13 @@ def _pre_llm_call_inner(**kwargs):
     continuity = _build_continuity_section(session_id=session_id, scope_key=scope_key)
     if continuity:
         context = continuity
+
+    # P3.6: skill hints — inject matching skill names so the agent
+    # never has to search for relevant skills.
+    if user_message and qctx.turn_lane != 'chit_chat':
+        skill_hints = _build_skill_hints_section(user_message)
+        if skill_hints:
+            context = (context + "\n\n" + skill_hints) if context else skill_hints
 
     if control.get('cancel'):
         _record_context_impression(
