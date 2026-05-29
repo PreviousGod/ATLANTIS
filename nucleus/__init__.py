@@ -714,6 +714,9 @@ def _post_tool_hook(tool_name=None, tool_result=None, result=None, session_id=No
         if tool_name in ("write_file", "patch"):
             _flag_pending_verification(sid, tool_name, tool_output)
 
+        # P4.3: auto-record tool results into active task graph
+        _record_to_task_graph(sid, tool_name, tool_output)
+
         nucleus = _get_nucleus()
         # If a tool succeeded, record it as a known solution pattern
         if not isinstance(tool_output, str):
@@ -747,6 +750,41 @@ def _post_tool_hook(tool_name=None, tool_result=None, result=None, session_id=No
     except Exception as e:
         log.warning("_post_tool_hook failed: %s", e)
         return None
+
+
+def _record_to_task_graph(session_id: str, tool_name: str, tool_output: Any) -> None:
+    """Auto-record tool results into active task graphs for learning."""
+    if not session_id or not tool_name:
+        return
+    try:
+        db_path = Path.home() / ".hermes" / "live_brain" / "live_brain.db"
+        if not db_path.exists():
+            return
+        import sqlite3
+        conn = sqlite3.connect(str(db_path))
+        from live_brain.task_graph import TaskGraph
+        tg = TaskGraph(conn)
+        # Find active graphs and record this execution
+        graphs = tg.active_graphs()
+        if not graphs:
+            conn.close()
+            return
+        # Record execution under the first active graph's current node
+        for g in graphs:
+            node = tg.next_node(g["graph_id"])
+            if node and node.get("tool_hint") == tool_name:
+                result_str = str(tool_output)[:1000]
+                success = "error" not in result_str.lower()
+                tg.complete_node(
+                    node["node_id"], result_str, session_id,
+                    tool_name, "", 0,
+                ) if success else tg.fail_node(
+                    node["node_id"], result_str, session_id, tool_name,
+                )
+                break
+        conn.close()
+    except Exception:
+        pass
 
 
 def _check_response_drift(user_message: str, assistant_response: str, session_id: str) -> None:

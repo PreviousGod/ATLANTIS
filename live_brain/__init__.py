@@ -309,6 +309,23 @@ GRAPH_DEBUG_SCHEMA = {
     }
 }
 
+TASK_GRAPH_SCHEMA = {
+    "name": "brain_task_graph",
+    "description": "Plan, track, and execute multi-step tasks autonomously. Use this for ANY complex workflow: APK patching, debugging, research. The graph remembers what's done/failed so you never retry blindly. Use action=plan to create a task, action=status to see progress, action=next to get the next step, action=complete when done, action=fail when blocked.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["plan", "next", "status", "complete", "fail", "skip", "seed", "list_templates"]},
+            "task_description": {"type": "string", "description": "What needs to be done (for plan/seed)."},
+            "graph_id": {"type": "string", "description": "Existing task graph ID (for next/status/complete/fail/skip)."},
+            "node_id": {"type": "string", "description": "Specific node ID (for complete/fail/skip)."},
+            "result": {"type": "string", "description": "What happened (for complete/fail)."},
+            "template_key": {"type": "string", "description": "Seed template to use (e.g. apk_patch_feature_id, debug_tool_failure, research_topic)."}
+        },
+        "required": ["action"]
+    }
+}
+
 
 # P2.7: lane-gated tool visibility. Weak LLMs see only the tools relevant
 # to the current turn lane — less choice = less hallucination.
@@ -322,7 +339,7 @@ _LANE_TOOL_NAMES: Dict[str, set] = {
         "brain_recap", "brain_recall", "brain_reality_debug",
         "brain_mark_belief", "brain_list_artifacts", "brain_mark_artifact",
         "brain_resolve_artifact", "brain_entity_graph", "brain_synthesize",
-        "brain_user_profile", "brain_compose_query",
+        "brain_user_profile", "brain_compose_query", "brain_task_graph",
     },
     "research_or_epistemic": {
         "brain_epistemic", "brain_research", "brain_recall",
@@ -676,6 +693,7 @@ class LiveBrainProvider(MemoryProvider):
             DIALECTIC_SCHEMA,
             USER_PROFILE_SCHEMA,
             COMPOSE_QUERY_SCHEMA,
+            TASK_GRAPH_SCHEMA,
         ]
         if os.environ.get("LIVE_BRAIN_EXPOSE_DEBUG_TOOLS", "").strip().lower() in {"1", "true", "yes", "on"}:
             all_schemas.extend([
@@ -741,6 +759,7 @@ class LiveBrainProvider(MemoryProvider):
             'brain_incident_truth_debug': self._handle_incident_truth_debug,
             'brain_trace_debug': self._handle_trace_debug,
             'brain_graph_debug': self._handle_graph_debug,
+            'brain_task_graph': self._handle_task_graph,
         }
         self._tool_handler_map = mapping
         return mapping
@@ -1015,6 +1034,102 @@ class LiveBrainProvider(MemoryProvider):
             max_matches=int(args.get("max_matches", 8)),
         )
         return json.dumps(result, ensure_ascii=False)
+
+    def _handle_task_graph(self, args: Dict[str, Any]) -> str:
+        """Handle brain_task_graph tool: plan, track, execute multi-step tasks."""
+        if not self._store:
+            return tool_error("Live brain store is not initialized")
+        from .task_graph import TaskGraph
+        tg = TaskGraph(self._store.conn)
+        action = args.get("action", "status")
+
+        if action == "plan":
+            graph_id = tg.plan(
+                args.get("task_description", ""),
+                self._scope_key,
+                template_key=args.get("template_key", ""),
+            )
+            node = tg.next_node(graph_id)
+            return json.dumps({
+                "graph_id": graph_id,
+                "status": "created",
+                "next": node,
+            }, ensure_ascii=False)
+
+        elif action == "seed":
+            template = args.get("template_key", "")
+            if not template:
+                return tool_error("template_key required for seed action")
+            desc = args.get("task_description", template)
+            graph_id = tg.seed_template(template, desc, self._scope_key)
+            node = tg.next_node(graph_id)
+            return json.dumps({
+                "graph_id": graph_id,
+                "template": template,
+                "next": node,
+            }, ensure_ascii=False)
+
+        elif action == "next":
+            graph_id = args.get("graph_id", "")
+            if not graph_id:
+                # Try to find active graph for this scope
+                graphs = tg.active_graphs(self._scope_key)
+                if graphs:
+                    graph_id = graphs[0]["graph_id"]
+            node = tg.next_node(graph_id) if graph_id else None
+            graph = tg.get_graph(graph_id) if graph_id else None
+            return json.dumps({
+                "graph": graph,
+                "next": node,
+            }, ensure_ascii=False)
+
+        elif action == "status":
+            graphs = tg.active_graphs(self._scope_key)
+            result = {"active_graphs": graphs}
+            graph_id = args.get("graph_id", "")
+            if graph_id:
+                result["graph"] = tg.get_graph(graph_id)
+                node = tg.next_node(graph_id)
+                if node:
+                    result["next"] = node
+            return json.dumps(result, ensure_ascii=False)
+
+        elif action == "complete":
+            graph_id = args.get("graph_id", "")
+            node_id = args.get("node_id", "")
+            if not node_id and graph_id:
+                node = tg.next_node(graph_id)
+                if node:
+                    node_id = node["node_id"]
+            if not node_id:
+                return tool_error("node_id required for complete action")
+            tg.complete_node(node_id, args.get("result", ""),
+                             self._session_id, "", "", 0)
+            next_node = tg.next_node(graph_id)
+            return json.dumps({
+                "completed": node_id,
+                "next": next_node,
+            }, ensure_ascii=False)
+
+        elif action == "fail":
+            node_id = args.get("node_id", "")
+            if not node_id:
+                return tool_error("node_id required for fail action")
+            tg.fail_node(node_id, args.get("result", ""),
+                         self._session_id, "")
+            return json.dumps({"failed": node_id, "status": "blocked"}, ensure_ascii=False)
+
+        elif action == "skip":
+            node_id = args.get("node_id", "")
+            if not node_id:
+                return tool_error("node_id required for skip action")
+            tg.skip_node(node_id, args.get("result", "Not needed"))
+            return json.dumps({"skipped": node_id}, ensure_ascii=False)
+
+        elif action == "list_templates":
+            return json.dumps({"templates": tg.list_templates()}, ensure_ascii=False)
+
+        return tool_error(f"Unknown action: {action}")
 
     def shutdown(self) -> None:
         # Drain the bounded sync executor with a deadline so we don't block

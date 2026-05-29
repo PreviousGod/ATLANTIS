@@ -3777,6 +3777,25 @@ def _build_skill_hints_section(user_message: str) -> str:
     return "\n".join(lines)
 
 
+def _build_task_graph_context(scope_key: str) -> str:
+    """Inject current task graph state so agent always knows next step."""
+    if not scope_key:
+        return ""
+    db_path = _db_path()
+    if not Path(db_path).exists():
+        return ""
+    try:
+        from live_brain.task_graph import TaskGraph
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        tg = TaskGraph(conn)
+        result = tg.current_task_context(scope_key)
+        conn.close()
+        return result
+    except Exception:
+        return ""
+
+
 def _build_continuity_section(*, session_id: str, scope_key: str) -> str:
     """Inject active task continuity for new/fresh sessions.
 
@@ -3951,6 +3970,16 @@ def _pre_llm_call_inner(**kwargs):
     continuity = _build_continuity_section(session_id=session_id, scope_key=scope_key)
     if continuity:
         context = continuity
+
+    # P4.2: task graph context — inject current task plan so the agent
+    # always knows what step to take next. No more guessing.
+    if qctx.turn_lane in {'deep_execution', 'simple_execution', 'continuation_or_resume'}:
+        try:
+            task_ctx = _build_task_graph_context(scope_key)
+            if task_ctx:
+                context = (context + "\n\n" + task_ctx) if context else task_ctx
+        except Exception:
+            pass
 
     # P3.6: skill hints — inject matching skill names so the agent
     # never has to search for relevant skills.
