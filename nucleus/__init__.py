@@ -476,6 +476,9 @@ def _pre_llm_hook(session_id=None, user_message=None, **kwargs):
 
     # P2.11: reset in-turn tool call counters on each user message
     _reset_in_turn_counts(sid)
+    # P4.4: reset task graph step counter each turn
+    with _TASK_GRAPH_STEPS_LOCK:
+        _TASK_GRAPH_STEPS_THIS_TURN[sid] = 0
     log.debug("SPIRAL reset counters for session %s", sid[:8])
 
     # Update SessionState with the user message — emission logic in
@@ -538,6 +541,11 @@ def _resolve_session_id(session_id, state, task_id=None) -> str:
 # P2.11: per-session, in-turn tool call counter. Reset on each user turn.
 _IN_TURN_TOOL_COUNTS: Dict[str, Dict[str, int]] = {}
 _IN_TURN_TOOL_COUNTS_LOCK = threading.Lock()
+
+# P4.4: per-session task graph step counter. Prevents auto-chaining all steps.
+_TASK_GRAPH_STEPS_THIS_TURN: Dict[str, int] = {}
+_TASK_GRAPH_STEPS_LOCK = threading.Lock()
+_MAX_TASK_STEPS_PER_TURN = 2
 
 # P4.1: per-session verification flags. Set when a mutation tool finishes.
 _PENDING_VERIFICATIONS: Dict[str, list] = {}
@@ -762,6 +770,14 @@ def _record_to_task_graph(session_id: str, tool_name: str, tool_output: Any) -> 
     """
     if not session_id or not tool_name:
         return
+
+    # P4.4: limit task graph steps per turn to prevent chaining all 7 steps
+    with _TASK_GRAPH_STEPS_LOCK:
+        steps = _TASK_GRAPH_STEPS_THIS_TURN.get(session_id, 0)
+        if steps >= _MAX_TASK_STEPS_PER_TURN:
+            return
+        _TASK_GRAPH_STEPS_THIS_TURN[session_id] = steps + 1
+
     try:
         db_path = Path.home() / ".hermes" / "live_brain" / "live_brain.db"
         if not db_path.exists():

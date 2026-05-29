@@ -422,6 +422,8 @@ class TaskGraph:
                     lines.append(f"  Use: {node['tool_hint']}")
                 if node.get("fix_recipe"):
                     lines.append(f"  Fix recipe: {node['fix_recipe'][:200]}")
+        if lines:
+            lines.append("Take ONE step, then respond to the user. Do NOT chain multiple steps.")
         return "\n".join(lines)
 
     # ── Seed / Template management ────────────────────────────────────
