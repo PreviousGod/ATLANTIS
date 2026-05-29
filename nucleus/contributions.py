@@ -137,6 +137,9 @@ def _detect_stuck_loop(state, session_id: str) -> str:
     if consecutive < 3:
         return ""
 
+    log.info("STUCK DETECTED: %d consecutive failures of '%s' in session %s",
+             consecutive, last_tool, session_id[:8])
+
     # Build the escape prompt — priority 2 to override informational sections
     return (
         f"NUCLEUS STUCK DETECTED:\n"
