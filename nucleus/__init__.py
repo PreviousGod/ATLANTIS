@@ -565,22 +565,34 @@ def _check_in_turn_spiral(tool_name: str, session_id: str, state) -> dict | None
     if count < 5:
         return None
     log.info("SPIRAL DETECTED: %s call #%d to '%s' this turn", session_id[:8], count, tool_name)
+    diagnosis = (
+        "FAILURE DIAGNOSIS REQUIRED:\n"
+        "- State EXACTLY what error you saw. Quote it.\n"
+        "- \"command not found\" → tool not installed → find alternative.\n"
+        "- \"INSTALL_FAILED\" → packaging broken → fix method, don't retry.\n"
+        "- \"ModuleNotFoundError\" → pip install or different approach.\n"
+        "- After ANY tool failure: diagnose root cause BEFORE next call.\n"
+        "- If 2+ same-type failures: STOP and explain to user."
+    )
     if count == 5:
         msg = (
             f"NUCLEUS SPIRAL WARNING: {count} calls to '{tool_name}' this turn.\n"
             "STOP calling tools. You are in a loop.\n"
-            "Respond to the user NOW with what you know and what's blocking you."
+            "Respond to the user NOW with what you know and what's blocking you.\n\n"
+            + diagnosis
         )
     elif count >= 10:
         msg = (
             f"NUCLEUS CRITICAL: {count} calls to '{tool_name}' this turn.\n"
             "STOP IMMEDIATELY. Do NOT call another tool.\n"
-            "Tell the user exactly what failed and ask for direction."
+            "Tell the user exactly what failed and ask for direction.\n\n"
+            + diagnosis
         )
     else:
         msg = (
             f"NUCLEUS WARNING: {count} calls to '{tool_name}' this turn.\n"
-            "Consider stopping tool calls and explaining the situation."
+            "Consider stopping tool calls and explaining the situation.\n\n"
+            + diagnosis
         )
     return {"context": msg}
 
@@ -737,6 +749,9 @@ def _check_response_drift(user_message: str, assistant_response: str, session_id
     overlap = user_words & resp_words
     if len(overlap) >= 2:
         return  # enough overlap — response is on-topic
+
+    log.info("DRIFT DETECTED: user=%d words, response=%d words, overlap=%d — queuing warning",
+             len(user_words), len(resp_words), len(overlap))
 
     # Drift detected — queue warning for next turn
     drift_msg = (
