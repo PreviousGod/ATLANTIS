@@ -56,6 +56,36 @@ class TaskNode:
 # ── Seed templates for common task types ──────────────────────────────
 
 _SEED_TEMPLATES: Dict[str, List[dict]] = {
+    "general_task": [
+        {"desc": "Understand what the user needs — ask clarifying questions if unclear", "tool": None, "args": None},
+        {"desc": "Check what you already know: use brain_recall if needed", "tool": None, "args": None},
+        {"desc": "Identify the first concrete step and execute it", "tool": None, "args": None},
+        {"desc": "Verify the result — did it work? Prove it", "tool": None, "args": None},
+        {"desc": "Report to user: what was done, what's next", "tool": None, "args": None},
+    ],
+    "code_implementation": [
+        {"desc": "Read the existing codebase to understand the structure", "tool": "read_file", "args": None},
+        {"desc": "Plan the change: what files need modification?", "tool": None, "args": None},
+        {"desc": "Implement the core logic", "tool": "write_file", "args": None},
+        {"desc": "Test the implementation", "tool": "terminal", "args": None},
+        {"desc": "Fix any issues found during testing", "tool": "patch", "args": None},
+        {"desc": "Verify all tests pass", "tool": "terminal", "args": None},
+    ],
+    "deploy_service": [
+        {"desc": "Check current deployment state — what's running?", "tool": "terminal", "args": None},
+        {"desc": "Build/prepare the deployment artifact", "tool": "terminal", "args": None},
+        {"desc": "Stop old service if running", "tool": "terminal", "args": None},
+        {"desc": "Deploy new version", "tool": "terminal", "args": None},
+        {"desc": "Verify service is healthy — check logs and endpoints", "tool": "terminal", "args": None},
+        {"desc": "Report deployment status to user", "tool": None, "args": None},
+    ],
+    "data_analysis": [
+        {"desc": "Load and inspect the data source", "tool": "terminal", "args": None},
+        {"desc": "Clean and preprocess the data", "tool": "terminal", "args": None},
+        {"desc": "Perform the analysis or computation", "tool": "terminal", "args": None},
+        {"desc": "Visualize or summarize the results", "tool": "terminal", "args": None},
+        {"desc": "Present findings to user", "tool": None, "args": None},
+    ],
     "apk_patch_feature_id": [
         {"desc": "Extract target DEX files from APK",
          "tool": "terminal", "args": '{"command": "unzip -o <apk> classes*.dex -d <workdir>"}'},
@@ -159,15 +189,35 @@ class TaskGraph:
 
     # ── Planning ──────────────────────────────────────────────────────
 
+    def _detect_template(self, task_description: str) -> str:
+        """Auto-detect the best template from the task description."""
+        desc = task_description.lower()
+        if any(w in desc for w in ("apk", "patch", "dex", "smali", "aifeature", "bytecode", "cosmo")):
+            return "apk_patch_feature_id"
+        if any(w in desc for w in ("deploy", "service", "restart", "docker", "server")):
+            return "deploy_service"
+        if any(w in desc for w in ("code", "implement", "refactor", "bug", "fix bug", "feature", "write")):
+            return "code_implementation"
+        if any(w in desc for w in ("data", "analyze", "analysis", "csv", "json", "chart", "statistics")):
+            return "data_analysis"
+        if any(w in desc for w in ("debug", "error", "failing", "broken", "fix", "traceback")):
+            return "debug_tool_failure"
+        if any(w in desc for w in ("research", "find", "search", "learn about", "what is")):
+            return "research_topic"
+        return "general_task"
+
     def plan(self, task_description: str, scope_key: str = "",
              graph_id: str = "", template_key: str = "") -> str:
         """Create a task graph and return the graph_id.
 
-        If a template_key matches a seed template, pre-populate nodes.
-        Otherwise create an empty graph for the agent to fill.
+        If template_key is provided, use that template. Otherwise auto-detect
+        the best template from the task description. Falls back to empty graph.
         """
         if not graph_id:
             graph_id = f"task:{scope_key}:{int(time.time())}"
+
+        if not template_key:
+            template_key = self._detect_template(task_description)
 
         now = time.time()
         self.conn.execute(

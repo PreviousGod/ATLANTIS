@@ -320,7 +320,7 @@ TASK_GRAPH_SCHEMA = {
             "graph_id": {"type": "string", "description": "Existing task graph ID (for next/status/complete/fail/skip)."},
             "node_id": {"type": "string", "description": "Specific node ID (for complete/fail/skip)."},
             "result": {"type": "string", "description": "What happened (for complete/fail)."},
-            "template_key": {"type": "string", "description": "Seed template to use (e.g. apk_patch_feature_id, debug_tool_failure, research_topic)."}
+            "template_key": {"type": "string", "description": "Seed template to use (auto-detected if omitted). Available: general_task, code_implementation, deploy_service, data_analysis, apk_patch_feature_id, debug_tool_failure, research_topic."}
         },
         "required": ["action"]
     }
