@@ -3777,6 +3777,37 @@ def _build_skill_hints_section(user_message: str) -> str:
     return "\n".join(lines)
 
 
+def _build_auto_task_graph(scope_key: str, user_message: str, session_id: str) -> str:
+    """Auto-create and inject task graph context. No manual commands needed.
+
+    If no active graph exists and the user message looks like a task,
+    auto-create a graph from the message. Then inject CURRENT TASK context.
+    """
+    if not scope_key or not user_message:
+        return ""
+    db_path = _db_path()
+    if not Path(db_path).exists():
+        return ""
+    try:
+        from live_brain.task_graph import TaskGraph
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        tg = TaskGraph(conn)
+
+        # Auto-create graph if none exists and message is task-like
+        graphs = tg.active_graphs(scope_key)
+        if not graphs and len(user_message) > 10:
+            # Create from auto-detected template
+            tg.plan(user_message[:120], scope_key, template_key="")
+            logger.info("[LIVE_BRAIN_CTX] auto-created task graph for: %s", user_message[:80])
+
+        result = tg.current_task_context(scope_key)
+        conn.close()
+        return result
+    except Exception:
+        return ""
+
+
 def _build_task_graph_context(scope_key: str) -> str:
     """Inject current task graph state so agent always knows next step."""
     if not scope_key:
@@ -3971,11 +4002,11 @@ def _pre_llm_call_inner(**kwargs):
     if continuity:
         context = continuity
 
-    # P4.2: task graph context — inject current task plan so the agent
-    # always knows what step to take next. No more guessing.
+    # P4.2: task graph context — auto-creates graph from user message.
+    # No manual brain_task_graph calls needed. The agent just talks.
     if qctx.turn_lane in {'deep_execution', 'simple_execution', 'continuation_or_resume'}:
         try:
-            task_ctx = _build_task_graph_context(scope_key)
+            task_ctx = _build_auto_task_graph(scope_key, user_message, session_id)
             if task_ctx:
                 context = (context + "\n\n" + task_ctx) if context else task_ctx
         except Exception:
