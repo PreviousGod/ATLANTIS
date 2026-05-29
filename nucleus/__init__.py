@@ -753,7 +753,13 @@ def _post_tool_hook(tool_name=None, tool_result=None, result=None, session_id=No
 
 
 def _record_to_task_graph(session_id: str, tool_name: str, tool_output: Any) -> None:
-    """Auto-record tool results into active task graphs for learning."""
+    """Auto-record tool results into active task graphs for learning.
+
+    Auto-advances the graph: if the current node's tool_hint matches
+    the executed tool, mark it complete. If the tool failed, mark it
+    failed (blocking dependents). This means the agent doesn't need
+    to manually call brain_task_graph complete/fail — it just works.
+    """
     if not session_id or not tool_name:
         return
     try:
@@ -764,27 +770,43 @@ def _record_to_task_graph(session_id: str, tool_name: str, tool_output: Any) -> 
         conn = sqlite3.connect(str(db_path))
         from live_brain.task_graph import TaskGraph
         tg = TaskGraph(conn)
-        # Find active graphs and record this execution
         graphs = tg.active_graphs()
         if not graphs:
             conn.close()
             return
-        # Record execution under the first active graph's current node
         for g in graphs:
             node = tg.next_node(g["graph_id"])
-            if node and node.get("tool_hint") == tool_name:
-                result_str = str(tool_output)[:1000]
-                success = "error" not in result_str.lower()
-                tg.complete_node(
-                    node["node_id"], result_str, session_id,
-                    tool_name, "", 0,
-                ) if success else tg.fail_node(
-                    node["node_id"], result_str, session_id, tool_name,
-                )
-                break
+            if not node:
+                continue
+            # Auto-advance: if current node has no tool_hint, complete it
+            # when ANY tool succeeds. If it has a tool_hint, match exactly.
+            result_str = str(tool_output)[:1000]
+            tool_ok = _tool_result_ok(tool_name, tool_output)
+            hinted = node.get("tool_hint", "")
+            if hinted and hinted == tool_name:
+                if tool_ok:
+                    tg.complete_node(node["node_id"], result_str, session_id, tool_name, "", 0)
+                    log.info("TASK GRAPH auto-complete: %s → %s", tool_name, node["description"][:60])
+                else:
+                    tg.fail_node(node["node_id"], result_str, session_id, tool_name)
+                    log.info("TASK GRAPH auto-fail: %s → %s", tool_name, node["description"][:60])
+            elif not hinted and tool_ok:
+                # Node has no specific tool hint — any success advances it
+                tg.complete_node(node["node_id"], result_str, session_id, tool_name, "", 0)
+                log.info("TASK GRAPH auto-complete (any tool): %s → %s", tool_name, node["description"][:60])
         conn.close()
     except Exception:
         pass
+
+
+def _tool_result_ok(tool_name: str, result: Any) -> bool:
+    """Check if a tool result indicates success."""
+    s = str(result or "").lower()
+    if any(e in s for e in ("error", "failed", "exception", "traceback",
+                              "command not found", "cannot stat", "no such file",
+                              "timed out", "exit_code\": 1", "exit_code\": 2")):
+        return False
+    return True
 
 
 def _check_response_drift(user_message: str, assistant_response: str, session_id: str) -> None:
